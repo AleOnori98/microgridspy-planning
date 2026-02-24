@@ -1,0 +1,47 @@
+meta:
+  units:
+    nominal_capacity: kW
+    specific_investment_cost: currency_per_kW
+    production_subsidy: currency_per_kWh
+    embedded_emissions: kgCO2e_per_kW
+    specific_area: m2_per_kW
+  context:
+    formulation: steady_state
+    multi_scenario: false
+    scenarios:
+    - scenario_1
+    capacity_expansion: false
+    investment_steps: null
+    inv_step_keys:
+    - base
+  notes:
+  - All values are defined per renewable source.
+  - 'Investment-side parameters MAY vary by investment step (cohorts): CAPEX, WACC,
+    lifetime, constraints, embodied emissions.'
+  - Technical parameters are step-invariant (single physics for the technology, no
+    cohort dispatch).
+  - Operational parameters MAY vary by scenario, but are NOT step-dependent (to keep
+    dispatch dimensions compact and linear).
+  - O&M is expressed as a share of total CAPEX per year.
+renewables:
+- id: res_1
+  conversion_technology: Solar PV
+  resource: Solar
+  investment:
+    by_step:
+      base:
+        nominal_capacity_kw: 1.0
+        specific_investment_cost_per_kw: 800
+        wacc: 0.05
+        grant_share_of_capex: 0.0
+        lifetime_years: 25
+        embedded_emissions_kgco2e_per_kw: 0.0
+  technical:
+    inverter_efficiency: 1.0
+    specific_area_m2_per_kw: null
+    max_installable_capacity_kw: null
+  operation:
+    by_scenario:
+      scenario_1:
+        fixed_om_share_per_year: 0.02
+        production_subsidy_per_kwh: 0.0

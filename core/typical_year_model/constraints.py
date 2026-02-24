@@ -7,27 +7,11 @@ import numpy as np
 import xarray as xr
 import linopy as lp
 
+from core.typical_year_model.params import get_params
+
 
 class InputValidationError(RuntimeError):
     pass
-
-
-def _bool_from_attrs(obj: xr.Dataset, path: list[str], default: bool = False) -> bool:
-    cur = obj.attrs
-    for k in path:
-        if not isinstance(cur, dict) or k not in cur:
-            return default
-        cur = cur[k]
-    return bool(cur)
-
-
-def _str_from_attrs(obj: xr.Dataset, path: list[str], default: str = "") -> str:
-    cur = obj.attrs
-    for k in path:
-        if not isinstance(cur, dict) or k not in cur:
-            return default
-        cur = cur[k]
-    return str(cur)
 
 
 def initialize_constraints(
@@ -65,13 +49,10 @@ def initialize_constraints(
     # ---------------------------------------------------------------------
     # Flags and enforcement mode (from attrs)
     # ---------------------------------------------------------------------
-    on_grid = _bool_from_attrs(data, ["settings", "grid", "on_grid"], default=False)
-    allow_export = _bool_from_attrs(data, ["settings", "grid", "allow_export"], default=False)
-    enforcement = _str_from_attrs(
-        data,
-        ["settings", "optimization_constraints", "enforcement"],
-        default="scenario_wise",
-    )
+    p = get_params(data)
+    on_grid = p.is_grid_on()
+    allow_export = p.is_grid_export_enabled()
+    enforcement = p.constraints_enforcement(default="scenario_wise")
     if enforcement not in ("expected", "scenario_wise"):
         raise InputValidationError(
             f"Invalid optimization_constraints.enforcement='{enforcement}'. "
@@ -82,44 +63,44 @@ def initialize_constraints(
     # Parameters (data vars)
     # ---------------------------------------------------------------------
     # Time series
-    load_demand = data["load_demand"]  # (period, scenario)
-    resource_availability = data["resource_availability"]  # (period, scenario, resource)
+    load_demand = p.load_demand  # (period, scenario)
+    resource_availability = p.resource_availability  # (period, scenario, resource)
 
     # Scenario weights (always present)
-    w_s = data["scenario_weight"]  # (scenario,)
+    w_s = p.scenario_weight  # (scenario,)
 
     # Renewables tech params
-    res_nom_kw = data["res_nominal_capacity_kw"]  # (resource)
-    res_inv_eta = data["res_inverter_efficiency"]  # (resource)
+    res_nom_kw = p.res_nominal_capacity_kw  # (resource)
+    res_inv_eta = p.res_inverter_efficiency  # (resource)
 
     # Optional land and max installable
-    land_m2 = data["land_availability_m2"]  # scalar 
-    res_area_m2_per_kw = data["res_specific_area_m2_per_kw"]  # (resource)
-    res_max_kw = data["res_max_installable_capacity_kw"]  # (resource) may contain NaN
+    land_m2 = p.land_availability_m2  # scalar 
+    res_area_m2_per_kw = p.res_specific_area_m2_per_kw  # (resource)
+    res_max_kw = p.res_max_installable_capacity_kw  # (resource) may contain NaN
 
     # Generator params
-    gen_nom_kw = data["generator_nominal_capacity_kw"]  # ()
-    gen_eta_full = data["generator_nominal_efficiency_full_load"]  # ()
-    fuel_lhv = data["fuel_lhv_kwh_per_unit_fuel"]  # (scenario,)
+    gen_nom_kw = p.generator_nominal_capacity_kw  # ()
+    gen_eta_full = p.generator_nominal_efficiency_full_load  # ()
+    fuel_lhv = p.fuel_lhv_kwh_per_unit_fuel  # (scenario,)
 
     # Battery params
-    bat_nom_kwh = data["battery_nominal_capacity_kwh"]  # ()
-    eta_c = data["battery_charge_efficiency"]  # (scenario,)
-    eta_d = data["battery_discharge_efficiency"]  # (scenario,)
-    soc0 = data["battery_initial_soc"]  # (scenario,) fraction
-    dod = data["battery_depth_of_discharge"]  # (scenario,) fraction
-    t_ch = data["battery_max_charge_time_hours"]  # (scenario,)
-    t_dis = data["battery_max_discharge_time_hours"]  # (scenario,)
+    bat_nom_kwh = p.battery_nominal_capacity_kwh  # ()
+    eta_c = p.battery_charge_efficiency  # (scenario,)
+    eta_d = p.battery_discharge_efficiency  # (scenario,)
+    soc0 = p.battery_initial_soc  # (scenario,) fraction
+    dod = p.battery_depth_of_discharge  # (scenario,) fraction
+    t_ch = p.battery_max_charge_time_hours  # (scenario,)
+    t_dis = p.battery_max_discharge_time_hours  # (scenario,)
 
     # System constraints params
-    min_res_pen = data["min_renewable_penetration"]  # scalar or (scenario,)
-    max_ll_frac = data["max_lost_load_fraction"]  # scalar or (scenario,)
+    min_res_pen = p.min_renewable_penetration  # scalar or (scenario,)
+    max_ll_frac = p.max_lost_load_fraction  # scalar or (scenario,)
 
     # Grid params (if on-grid)
     if on_grid:
-        line_cap_kw = data["grid_line_capacity_kw"]  # (scenario,)
-        grid_eta = data["grid_transmission_efficiency"]  # (scenario,)
-        grid_avail = data["grid_availability"]  # (period, scenario)
+        line_cap_kw = p.grid_line_capacity_kw  # (scenario,)
+        grid_eta = p.grid_transmission_efficiency  # (scenario,)
+        grid_avail = p.grid_availability  # (period, scenario)
 
     # ---------------------------------------------------------------------
     # Variables (aliases)
@@ -175,8 +156,8 @@ def initialize_constraints(
     #   - If partial-load enabled: convex piecewise lower bound on fuel_cons
     # ---------------------------------------------------------------------
 
-    pl_rel = data.get("generator_eff_curve_rel_power", None)
-    pl_eff = data.get("generator_eff_curve_eff", None)
+    pl_rel = p.generator_eff_curve_rel_power
+    pl_eff = p.generator_eff_curve_eff
 
     pl_points_ok = (
         pl_rel is not None and pl_eff is not None

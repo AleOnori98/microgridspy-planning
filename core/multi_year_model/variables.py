@@ -6,25 +6,11 @@ from typing import Dict
 import xarray as xr
 import linopy as lp
 
+from core.multi_year_model.params import get_params
+
 
 class InputValidationError(RuntimeError):
     pass
-
-
-def _bool_from_attrs(obj: xr.Dataset, path: list[str], default: bool = False) -> bool:
-    """
-    Read a nested boolean from obj.attrs, e.g. path=["settings","grid","on_grid"].
-
-    Returns:
-        bool: The value found at the nested path, cast to bool.
-              If the path does not exist (or attrs is not a dict chain), returns `default`.
-    """
-    cur = obj.attrs
-    for k in path:
-        if not isinstance(cur, dict) or k not in cur:
-            return default
-        cur = cur[k]
-    return bool(cur)
 
 
 def initialize_vars(sets: xr.Dataset, data: xr.Dataset, model: lp.Model) -> Dict[str, lp.Variable]:
@@ -71,15 +57,14 @@ def initialize_vars(sets: xr.Dataset, data: xr.Dataset, model: lp.Model) -> Dict
     resource = sets.coords["resource"]
 
     # --- feature flags (stored in data.attrs in your initializer)
-    on_grid = _bool_from_attrs(data, ["settings", "grid", "on_grid"], default=False)
-    allow_export = _bool_from_attrs(data, ["settings", "grid", "allow_export"], default=False)
-    partial_load_enabled = _bool_from_attrs(
-        data, ["settings", "generator", "partial_load_modelling_enabled"], default=False
-    )
-    is_integer = _bool_from_attrs(data, ["settings", "unit_commitment"], default=False)
+    p = get_params(data)
+    on_grid = p.is_grid_on()
+    allow_export = p.is_grid_export_enabled()
+    partial_load_enabled = bool((p.settings.get("generator", {}) or {}).get("partial_load_modelling_enabled", False))
+    is_integer = bool(p.settings.get("unit_commitment", False))
 
     # curve coord exists only if you merged curve_ds
-    has_curve_coord = "curve_point" in data.coords
+    has_curve_coord = p.curve_point is not None
 
     vars: Dict[str, lp.Variable] = {}
 
@@ -193,7 +178,7 @@ def initialize_vars(sets: xr.Dataset, data: xr.Dataset, model: lp.Model) -> Dict
     # Keep this minimal: create segment energy variables only if curve exists.
     # Later you can enforce convex combination / SOS2 / piecewise constraints.
     if partial_load_enabled and has_curve_coord:
-        curve_point = data.coords["curve_point"]
+        curve_point = p.curve_point
         vars["gen_segment_energy"] = model.add_variables(
             lower=0.0,
             dims=("period", "year", "scenario", "curve_point"),
