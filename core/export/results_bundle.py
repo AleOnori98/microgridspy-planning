@@ -9,6 +9,7 @@ import xarray as xr
 
 @dataclass
 class ResultsBundle:
+    formulation_mode: Optional[str] = None
     sets: Optional[xr.Dataset] = None
     data: Optional[xr.Dataset] = None
     vars: Optional[Dict[str, Any]] = None
@@ -54,7 +55,14 @@ def build_results_bundle(
     if solver is not None:
         meta["solver"] = solver
 
+    formulation_mode = None
+    if isinstance(data, xr.Dataset):
+        s = (data.attrs or {}).get("settings", {})
+        if isinstance(s, dict):
+            formulation_mode = str(s.get("formulation", "")) or None
+
     return ResultsBundle(
+        formulation_mode=formulation_mode,
         sets=sets if isinstance(sets, xr.Dataset) else None,
         data=data if isinstance(data, xr.Dataset) else None,
         vars=vars if isinstance(vars, dict) else None,
@@ -63,4 +71,3 @@ def build_results_bundle(
         status=status,
         metadata=meta,
     )
-

@@ -15,6 +15,12 @@ from core.export.results_page_helpers import (
     export_results_from_bundle,
     get_results_bundle_from_session,
 )
+from core.export.multi_year_results import (
+    build_dispatch_timeseries_table_multi_year,
+    build_discounted_cashflows_table_multi_year,
+    build_design_by_step_table_multi_year,
+    build_yearly_kpis_table_multi_year,
+)
 
 
 # Keep aligned with your Optimization page
@@ -278,6 +284,107 @@ def _render_energy_balance_check(bundle: ResultsBundle, tolerance: float = 1e-6)
         st.dataframe(eb, use_container_width=True)
 
 
+def _render_multi_year_results(bundle: ResultsBundle, project_name: str) -> None:
+    data = bundle.data
+    vars_dict = bundle.vars if isinstance(bundle.vars, dict) else {}
+    sol_ds = bundle.solution if isinstance(bundle.solution, xr.Dataset) else None
+    sets_ds = bundle.sets if isinstance(bundle.sets, xr.Dataset) else xr.Dataset()
+    if not isinstance(data, xr.Dataset):
+        st.error("Missing data dataset.")
+        return
+
+    dispatch = build_dispatch_timeseries_table_multi_year(data=data, vars=vars_dict, solution=sol_ds)
+    kpis = build_yearly_kpis_table_multi_year(data=data, vars=vars_dict, solution=sol_ds, objective_value=bundle.objective_value)
+    design = build_design_by_step_table_multi_year(sets=sets_ds, data=data, vars=vars_dict, solution=sol_ds)
+    cash = build_discounted_cashflows_table_multi_year(sets=sets_ds, data=data, vars=vars_dict, solution=sol_ds)
+
+    st.subheader("Least-Cost Energy Mix")
+    years = sorted(dispatch["year"].astype(str).unique().tolist())
+    scenarios = sorted(dispatch["scenario"].astype(str).unique().tolist())
+    c1, c2 = st.columns(2)
+    with c1:
+        y_sel = st.selectbox("Year", years, key="my_disp_year")
+    with c2:
+        s_sel = st.selectbox("Scenario", ["Expected"] + scenarios, key="my_disp_scenario")
+
+    view = dispatch[dispatch["year"].astype(str) == str(y_sel)].copy()
+    if s_sel == "Expected":
+        w = data.get("scenario_weight", None)
+        if isinstance(w, xr.DataArray):
+            w_map = {str(s): float(w.sel(scenario=s)) for s in w.coords["scenario"].values}
+            view["w"] = view["scenario"].astype(str).map(w_map).fillna(0.0)
+            agg_cols = [
+                "load_demand",
+                "res_generation_total",
+                "generator_generation",
+                "battery_charge",
+                "battery_discharge",
+                "lost_load",
+                "grid_import",
+                "grid_export",
+            ]
+            view = (
+                view.groupby("period", as_index=False)
+                .apply(lambda g: pd.Series({c: float((g[c] * g["w"]).sum()) for c in agg_cols}))
+                .reset_index(drop=True)
+            )
+        else:
+            view = view.groupby("period", as_index=False).mean(numeric_only=True)
+    else:
+        view = view[view["scenario"].astype(str) == s_sel]
+
+    view = view.sort_values("period")
+    x = view["period"].to_numpy()
+    fig, ax = plt.subplots(figsize=(11, 4))
+    _plot_dispatch_stack(
+        ax=ax,
+        x=x,
+        y_res=view["res_generation_total"].to_numpy(),
+        y_bdis=view["battery_discharge"].to_numpy(),
+        y_gen=view["generator_generation"].to_numpy(),
+        y_gimp=view["grid_import"].to_numpy(),
+        y_ll=view["lost_load"].to_numpy(),
+        y_bch=view["battery_charge"].to_numpy(),
+        y_gexp=view["grid_export"].to_numpy(),
+        y_load=view["load_demand"].to_numpy(),
+        title_suffix=f"Year {y_sel} - {s_sel}",
+    )
+    st.pyplot(fig, use_container_width=True)
+
+    with st.expander("Energy Balance Check", expanded=False):
+        eb = build_energy_balance_dataframe(bundle)
+        eb_slice = eb[(eb["year"].astype(str) == str(y_sel))]
+        if s_sel != "Expected":
+            eb_slice = eb_slice[eb_slice["scenario"].astype(str) == s_sel]
+        worst = (
+            eb.groupby(["year", "scenario"], as_index=False)["balance_residual"]
+            .agg(max_abs_residual=lambda x: float(np.max(np.abs(np.asarray(x, dtype=float)))))
+        )
+        st.markdown("**Worst-case residuals**")
+        st.dataframe(worst, use_container_width=True)
+        st.markdown("**Selected slice**")
+        st.dataframe(eb_slice, use_container_width=True)
+
+    with st.expander("Yearly KPIs", expanded=True):
+        st.dataframe(kpis, use_container_width=True)
+
+    with st.expander("Cohort / Capacity Expansion", expanded=True):
+        st.dataframe(design, use_container_width=True)
+
+    with st.expander("Discounted Cashflows & Salvage", expanded=True):
+        st.dataframe(cash, use_container_width=True)
+
+    st.subheader("Export Results")
+    if st.button("Export results to CSV", type="primary", key="my_export_btn"):
+        try:
+            model_obj = st.session_state.get("gp_model_obj")
+            written = export_results_from_bundle(project_name, bundle, model_obj=model_obj)
+            st.success("Export completed.")
+            st.json(written)
+        except Exception as e:
+            st.error(f"Export failed: {e}")
+
+
 # -----------------------------------------------------------------------------
 # page
 # -----------------------------------------------------------------------------
@@ -302,6 +409,11 @@ def render_generation_planning_results_page() -> None:
     _render_quick_inspection(bundle)
 
     settings = _get_settings(data)
+    formulation = str(settings.get("formulation", "steady_state"))
+    if formulation == "dynamic":
+        _render_multi_year_results(bundle, project_name)
+        return
+
     on_grid = _get_flag(settings, ("grid", "on_grid"), default=False)
     allow_export = _get_flag(settings, ("grid", "allow_export"), default=False)
 

@@ -86,6 +86,8 @@ class MultiYearModel:
             raise RuntimeError("_initialize_objective: model is not initialized.")
 
         initialize_objective(self.sets, self.data, self.vars, self.model)
+        if getattr(self.model, "objective", None) is None:
+            raise RuntimeError("_initialize_objective: objective was not set on linopy model.")
         self._flags.model_built = True
 
     def _build_model(self, build_objective: bool = True) -> None:
@@ -160,6 +162,8 @@ class MultiYearModel:
             )
         if self.model is None:
             raise RuntimeError("solve_single_objective: linopy model is not initialized.")
+        if getattr(self.model, "objective", None) is None:
+            raise RuntimeError("solve_single_objective: objective is missing on linopy model.")
 
         # Record log path for UI (note: solver controls actual logging)
         if log_file_path is not None:
@@ -186,7 +190,17 @@ class MultiYearModel:
             pass
 
         # Solve call
-        result = self.model.solve(solver_name=solver, **solve_kwargs) if "solver_name" in getattr(self.model.solve, "__code__", object()).co_varnames else self.model.solve(solver, **solve_kwargs)
+        solve_fn = self.model.solve
+        try:
+            result = solve_fn(solver_name=solver, **solve_kwargs) if "solver_name" in getattr(solve_fn, "__code__", object()).co_varnames else solve_fn(solver, **solve_kwargs)
+        except ValueError as e:
+            msg = str(e)
+            if "contains nan" in msg.lower():
+                raise RuntimeError(
+                    "Model contains NaN coefficients (typically in objective/constraints). "
+                    "Check multi-year input parameters for missing/invalid numeric values."
+                ) from e
+            raise
 
         # Linopy stores solution on the model
         sol = getattr(self.model, "solution", None)
@@ -195,7 +209,7 @@ class MultiYearModel:
         # status handling differs across versions: "result" might be a string or object
         out.attrs["solver"] = solver
         out.attrs["solver_params"] = dict(solver_params or {})
-        out.attrs["status"] = str(getattr(result, "status", result))
+        out.attrs["status"] = str(getattr(result, "status", getattr(self.model, "status", result)))
 
         # objective value (best effort)
         obj_val = None
@@ -211,6 +225,11 @@ class MultiYearModel:
             try:
                 if hasattr(result, "objective_value"):
                     obj_val = float(result.objective_value)
+            except Exception:
+                pass
+        if obj_val is None:
+            try:
+                obj_val = float(getattr(self.model.objective, "value"))
             except Exception:
                 pass
         if obj_val is not None:

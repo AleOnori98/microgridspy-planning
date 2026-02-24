@@ -702,12 +702,18 @@ def _load_battery_yaml(
         blk = inv_by_step[st]
         if not isinstance(blk, dict):
             raise InputValidationError(f"{path.name}: battery.investment.by_step['{st}'] must be a dict.")
+        si = step_to_idx[st]
 
         for k in INVESTMENT_BY_STEP:
             if k not in blk:
                 raise InputValidationError(
                     f"{path.name}: missing investment param '{k}' in battery.investment.by_step['{st}']."
                 )
+            # Persist parsed investment values into (inv_step,) arrays.
+            if k in ("max_installable_capacity_kwh",):
+                inv_arr[k][si] = _as_float_or_nan(blk.get(k), name=f"battery/investment/{st}/{k}")
+            else:
+                inv_arr[k][si] = _as_float(blk.get(k), name=f"battery/investment/{st}/{k}", default=0.0)
 
     # -----------------------------
     # 2) Technical block: battery.technical (step-invariant)

@@ -19,6 +19,25 @@ def _require_da(name: str, da: xr.DataArray | None) -> xr.DataArray:
     return da
 
 
+def _require_finite_da(name: str, da: xr.DataArray | None) -> xr.DataArray:
+    out = _require_da(name, da)
+    vals = np.asarray(out.values, dtype=float)
+    mask = ~np.isfinite(vals)
+    if np.any(mask):
+        n_bad = int(mask.sum())
+        n_tot = int(vals.size)
+        raise InputValidationError(
+            f"Parameter '{name}' contains non-finite values ({n_bad}/{n_tot}). "
+            "Please fix NaN/inf values in project inputs before solving."
+        )
+    return out
+
+
+def _finite_or_zero(da: xr.DataArray | float | int) -> xr.DataArray:
+    out = xr.DataArray(da)
+    return xr.where(np.isfinite(out), out, 0.0)
+
+
 def _crf(rate: xr.DataArray | float, lifetime: xr.DataArray | float) -> xr.DataArray:
     """
     Capital Recovery Factor:
@@ -153,7 +172,7 @@ def initialize_objective(
         raise InputValidationError(f"Invalid social_discount_rate={rs}. Must be > -1.")
     disc_y = _discount_factor_by_year(sets, rs)  # (year,)
 
-    w_s = _require_da("scenario_weight", p.scenario_weight)
+    w_s = _require_finite_da("scenario_weight", p.scenario_weight)
 
     # ------------------------------------------------------------------
     # Variables
@@ -171,21 +190,21 @@ def initialize_objective(
     # ------------------------------------------------------------------
     # Required investment parameters
     # ------------------------------------------------------------------
-    res_nom_kw = _require_da("res_nominal_capacity_kw", p.res_nominal_capacity_kw)
-    res_capex_kw = _require_da("res_specific_investment_cost_per_kw", p.res_specific_investment_cost_per_kw)
-    res_life_y = _require_da("res_lifetime_years", p.res_lifetime_years)
-    res_wacc = _require_da("res_wacc", p.res_wacc)
-    res_grant = _require_da("res_grant_share_of_capex", p.res_grant_share_of_capex)
+    res_nom_kw = _require_finite_da("res_nominal_capacity_kw", p.res_nominal_capacity_kw)
+    res_capex_kw = _require_finite_da("res_specific_investment_cost_per_kw", p.res_specific_investment_cost_per_kw)
+    res_life_y = _require_finite_da("res_lifetime_years", p.res_lifetime_years)
+    res_wacc = _require_finite_da("res_wacc", p.res_wacc)
+    res_grant = _require_finite_da("res_grant_share_of_capex", p.res_grant_share_of_capex)
 
-    bat_nom_kwh = _require_da("battery_nominal_capacity_kwh", p.battery_nominal_capacity_kwh)
-    bat_capex_kwh = _require_da("battery_specific_investment_cost_per_kwh", p.battery_specific_investment_cost_per_kwh)
-    bat_life_y = _require_da("battery_calendar_lifetime_years", p.battery_calendar_lifetime_years)
-    bat_wacc = _require_da("battery_wacc", p.battery_wacc)
+    bat_nom_kwh = _require_finite_da("battery_nominal_capacity_kwh", p.battery_nominal_capacity_kwh)
+    bat_capex_kwh = _require_finite_da("battery_specific_investment_cost_per_kwh", p.battery_specific_investment_cost_per_kwh)
+    bat_life_y = _require_finite_da("battery_calendar_lifetime_years", p.battery_calendar_lifetime_years)
+    bat_wacc = _require_finite_da("battery_wacc", p.battery_wacc)
 
-    gen_nom_kw = _require_da("generator_nominal_capacity_kw", p.generator_nominal_capacity_kw)
-    gen_capex_kw = _require_da("generator_specific_investment_cost_per_kw", p.generator_specific_investment_cost_per_kw)
-    gen_life_y = _require_da("generator_lifetime_years", p.generator_lifetime_years)
-    gen_wacc = _require_da("generator_wacc", p.generator_wacc)
+    gen_nom_kw = _require_finite_da("generator_nominal_capacity_kw", p.generator_nominal_capacity_kw)
+    gen_capex_kw = _require_finite_da("generator_specific_investment_cost_per_kw", p.generator_specific_investment_cost_per_kw)
+    gen_life_y = _require_finite_da("generator_lifetime_years", p.generator_lifetime_years)
+    gen_wacc = _require_finite_da("generator_wacc", p.generator_wacc)
 
     # ------------------------------------------------------------------
     # Investment annuities
@@ -211,18 +230,18 @@ def initialize_objective(
     # OPEX (year, scenario) then expected value
     # ------------------------------------------------------------------
     fuel_cost = p.fuel_cost_per_unit_fuel if p.fuel_cost_per_unit_fuel is not None else p.fuel_fuel_cost_per_unit_fuel
-    fuel_cost = _require_da("fuel_cost_per_unit_fuel", fuel_cost)
+    fuel_cost = _require_finite_da("fuel_cost_per_unit_fuel", fuel_cost)
     fuel_cost_y_s = (fuel_cons * fuel_cost).sum("period")
 
     if on_grid:
         if grid_imp is None:
             raise InputValidationError("grid is enabled but variable 'grid_import' is missing.")
-        grid_import_price = _require_da("grid_import_price", p.grid_import_price)
+        grid_import_price = _require_finite_da("grid_import_price", p.grid_import_price)
         grid_import_cost_y_s = (grid_imp * grid_import_price).sum("period")
         if allow_export:
             if grid_exp is None:
                 raise InputValidationError("grid export is enabled but variable 'grid_export' is missing.")
-            grid_export_price = _require_da("grid_export_price", p.grid_export_price)
+            grid_export_price = _require_finite_da("grid_export_price", p.grid_export_price)
             grid_export_rev_y_s = (grid_exp * grid_export_price).sum("period")
         else:
             grid_export_rev_y_s = 0.0
@@ -235,27 +254,27 @@ def initialize_objective(
         subsidy = p.res_production_subsidy_per_kwh
         if "inv_step" in subsidy.dims:
             subsidy = subsidy.isel(inv_step=0, drop=True)
-        res_subsidy_rev_y_s = (res_gen * subsidy).sum("period").sum("resource")
+        res_subsidy_rev_y_s = (res_gen * _finite_or_zero(subsidy)).sum("period").sum("resource")
     else:
         res_subsidy_rev_y_s = 0.0
 
     # Fixed O&M (optional but present in current templates)
     if p.res_fixed_om_share_per_year is not None:
-        res_fom_share = p.res_fixed_om_share_per_year
+        res_fom_share = _finite_or_zero(p.res_fixed_om_share_per_year)
         res_capex_base = res_units * res_nom_kw * res_capex_kw
         res_fom_y_s = (res_capex_base * res_active * res_fom_share).sum("inv_step").sum("resource")
     else:
         res_fom_y_s = 0.0
 
     if p.battery_fixed_om_share_per_year is not None:
-        bat_fom_share = p.battery_fixed_om_share_per_year
+        bat_fom_share = _finite_or_zero(p.battery_fixed_om_share_per_year)
         bat_capex_base = bat_units * bat_nom_kwh * bat_capex_kwh
         bat_fom_y_s = (bat_capex_base * bat_active * bat_fom_share).sum("inv_step")
     else:
         bat_fom_y_s = 0.0
 
     if p.generator_fixed_om_share_per_year is not None:
-        gen_fom_share = p.generator_fixed_om_share_per_year
+        gen_fom_share = _finite_or_zero(p.generator_fixed_om_share_per_year)
         gen_capex_base = gen_units * gen_nom_kw * gen_capex_kw
         gen_fom_y_s = (gen_capex_base * gen_active).sum("inv_step") * gen_fom_share
     else:
@@ -274,9 +293,9 @@ def initialize_objective(
     # ------------------------------------------------------------------
     # Externalities (year, scenario) + embedded at commissioning
     # ------------------------------------------------------------------
-    lost_load_cost = _require_da("lost_load_cost_per_kwh", p.lost_load_cost_per_kwh)
-    emission_cost = _require_da("emission_cost_per_kgco2e", p.emission_cost_per_kgco2e)
-    fuel_direct_kg = _require_da("fuel_direct_emissions_kgco2e_per_unit_fuel", p.fuel_direct_emissions_kgco2e_per_unit_fuel)
+    lost_load_cost = _require_finite_da("lost_load_cost_per_kwh", p.lost_load_cost_per_kwh)
+    emission_cost = _require_finite_da("emission_cost_per_kgco2e", p.emission_cost_per_kgco2e)
+    fuel_direct_kg = _require_finite_da("fuel_direct_emissions_kgco2e_per_unit_fuel", p.fuel_direct_emissions_kgco2e_per_unit_fuel)
 
     ll_cost_y_s = lost_load.sum("period") * lost_load_cost
     direct_em_kg_y_s = fuel_cons.sum("period") * fuel_direct_kg
@@ -291,13 +310,16 @@ def initialize_objective(
 
     emb_y = 0.0
     if p.res_embedded_emissions_kgco2e_per_kw is not None:
-        res_emb_kg = res_units * res_nom_kw * p.res_embedded_emissions_kgco2e_per_kw
+        res_emb_fac = _require_finite_da("res_embedded_emissions_kgco2e_per_kw", p.res_embedded_emissions_kgco2e_per_kw)
+        res_emb_kg = res_units * res_nom_kw * res_emb_fac
         emb_y = emb_y + (res_emb_kg * commission).sum("inv_step").sum("resource") * em_cost_exp
     if p.battery_embedded_emissions_kgco2e_per_kwh is not None:
-        bat_emb_kg = bat_units * bat_nom_kwh * p.battery_embedded_emissions_kgco2e_per_kwh
+        bat_emb_fac = _require_finite_da("battery_embedded_emissions_kgco2e_per_kwh", p.battery_embedded_emissions_kgco2e_per_kwh)
+        bat_emb_kg = bat_units * bat_nom_kwh * bat_emb_fac
         emb_y = emb_y + (bat_emb_kg * commission).sum("inv_step") * em_cost_exp
     if p.generator_embedded_emissions_kgco2e_per_kw is not None:
-        gen_emb_kg = gen_units * gen_nom_kw * p.generator_embedded_emissions_kgco2e_per_kw
+        gen_emb_fac = _require_finite_da("generator_embedded_emissions_kgco2e_per_kw", p.generator_embedded_emissions_kgco2e_per_kw)
+        gen_emb_kg = gen_units * gen_nom_kw * gen_emb_fac
         emb_y = emb_y + (gen_emb_kg * commission).sum("inv_step") * em_cost_exp
 
     total_cashflow_y = expected_cashflow_y + emb_y

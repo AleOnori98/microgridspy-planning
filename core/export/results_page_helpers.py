@@ -12,6 +12,11 @@ from core.export.typical_year_results import (
     build_energy_balance_table,
     export_typical_year_results,
 )
+from core.export.multi_year_results import (
+    build_dispatch_timeseries_table_multi_year,
+    build_energy_balance_table_multi_year,
+    export_multi_year_results,
+)
 from core.io.utils import project_paths
 
 
@@ -64,6 +69,15 @@ def get_var_solution(
 def build_energy_balance_dataframe(bundle: ResultsBundle) -> pd.DataFrame:
     if bundle.data is None or not isinstance(bundle.vars, dict):
         raise RuntimeError("Missing data/vars in ResultsBundle.")
+    settings = (bundle.data.attrs or {}).get("settings", {}) if isinstance(bundle.data, xr.Dataset) else {}
+    formulation = str(settings.get("formulation", "steady_state"))
+    if formulation == "dynamic":
+        dispatch = build_dispatch_timeseries_table_multi_year(
+            data=bundle.data,
+            vars=bundle.vars,
+            solution=bundle.solution if isinstance(bundle.solution, xr.Dataset) else None,
+        )
+        return build_energy_balance_table_multi_year(dispatch)
     dispatch = build_dispatch_timeseries_table(
         data=bundle.data,
         vars=bundle.vars,
@@ -82,6 +96,18 @@ def export_results_from_bundle(
 
     sets_ds = bundle.sets if isinstance(bundle.sets, xr.Dataset) else xr.Dataset()
     out_dir = project_paths(project_name).results_dir
+    settings = (bundle.data.attrs or {}).get("settings", {}) if isinstance(bundle.data, xr.Dataset) else {}
+    formulation = str(settings.get("formulation", "steady_state"))
+    if formulation == "dynamic":
+        return export_multi_year_results(
+            project_name=project_name,
+            sets=sets_ds,
+            data=bundle.data,
+            model=getattr(model_obj, "model", None),
+            vars=bundle.vars,
+            solution=bundle.solution if isinstance(bundle.solution, xr.Dataset) else None,
+            out_dir=Path(out_dir),
+        )
     return export_typical_year_results(
         project_name=project_name,
         sets=sets_ds,
