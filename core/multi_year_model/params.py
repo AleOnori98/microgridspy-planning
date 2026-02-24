@@ -24,6 +24,13 @@ class Params:
 
     # Renewables
     res_nominal_capacity_kw: Optional[xr.DataArray]
+    res_lifetime_years: Optional[xr.DataArray]
+    res_specific_investment_cost_per_kw: Optional[xr.DataArray]
+    res_wacc: Optional[xr.DataArray]
+    res_grant_share_of_capex: Optional[xr.DataArray]
+    res_embedded_emissions_kgco2e_per_kw: Optional[xr.DataArray]
+    res_fixed_om_share_per_year: Optional[xr.DataArray]
+    res_production_subsidy_per_kwh: Optional[xr.DataArray]
     res_inverter_efficiency: Optional[xr.DataArray]
     res_specific_area_m2_per_kw: Optional[xr.DataArray]
     res_max_installable_capacity_kw: Optional[xr.DataArray]
@@ -34,6 +41,8 @@ class Params:
     battery_specific_investment_cost_per_kwh: Optional[xr.DataArray]
     battery_wacc: Optional[xr.DataArray]
     battery_calendar_lifetime_years: Optional[xr.DataArray]
+    battery_fixed_om_share_per_year: Optional[xr.DataArray]
+    battery_embedded_emissions_kgco2e_per_kwh: Optional[xr.DataArray]
     battery_max_installable_capacity_kwh: Optional[xr.DataArray]
     battery_charge_efficiency: Optional[xr.DataArray]
     battery_discharge_efficiency: Optional[xr.DataArray]
@@ -54,6 +63,7 @@ class Params:
     generator_fixed_om_share_per_year: Optional[xr.DataArray]
     generator_embedded_emissions_kgco2e_per_kw: Optional[xr.DataArray]
     fuel_lhv_kwh_per_unit_fuel: Optional[xr.DataArray]
+    fuel_cost_per_unit_fuel: Optional[xr.DataArray]
     fuel_fuel_cost_per_unit_fuel: Optional[xr.DataArray]
     fuel_direct_emissions_kgco2e_per_unit_fuel: Optional[xr.DataArray]
 
@@ -97,6 +107,13 @@ def get_params(ds: xr.Dataset) -> Params:
         land_availability_m2=_opt("land_availability_m2"),
         emission_cost_per_kgco2e=_opt("emission_cost_per_kgco2e"),
         res_nominal_capacity_kw=_opt("res_nominal_capacity_kw"),
+        res_lifetime_years=_opt("res_lifetime_years"),
+        res_specific_investment_cost_per_kw=_opt("res_specific_investment_cost_per_kw"),
+        res_wacc=_opt("res_wacc"),
+        res_grant_share_of_capex=_opt("res_grant_share_of_capex"),
+        res_embedded_emissions_kgco2e_per_kw=_opt("res_embedded_emissions_kgco2e_per_kw"),
+        res_fixed_om_share_per_year=_opt("res_fixed_om_share_per_year"),
+        res_production_subsidy_per_kwh=_opt("res_production_subsidy_per_kwh"),
         res_inverter_efficiency=_opt("res_inverter_efficiency"),
         res_specific_area_m2_per_kw=_opt("res_specific_area_m2_per_kw"),
         res_max_installable_capacity_kw=_opt("res_max_installable_capacity_kw"),
@@ -105,6 +122,8 @@ def get_params(ds: xr.Dataset) -> Params:
         battery_specific_investment_cost_per_kwh=_opt("battery_specific_investment_cost_per_kwh"),
         battery_wacc=_opt("battery_wacc"),
         battery_calendar_lifetime_years=_opt("battery_calendar_lifetime_years"),
+        battery_fixed_om_share_per_year=_opt("battery_fixed_om_share_per_year"),
+        battery_embedded_emissions_kgco2e_per_kwh=_opt("battery_embedded_emissions_kgco2e_per_kwh"),
         battery_max_installable_capacity_kwh=_opt("battery_max_installable_capacity_kwh"),
         battery_charge_efficiency=_opt("battery_charge_efficiency"),
         battery_discharge_efficiency=_opt("battery_discharge_efficiency"),
@@ -123,6 +142,7 @@ def get_params(ds: xr.Dataset) -> Params:
         generator_fixed_om_share_per_year=_opt("generator_fixed_om_share_per_year"),
         generator_embedded_emissions_kgco2e_per_kw=_opt("generator_embedded_emissions_kgco2e_per_kw"),
         fuel_lhv_kwh_per_unit_fuel=_opt("fuel_lhv_kwh_per_unit_fuel"),
+        fuel_cost_per_unit_fuel=_opt("fuel_cost_per_unit_fuel"),
         fuel_fuel_cost_per_unit_fuel=_opt("fuel_fuel_cost_per_unit_fuel"),
         fuel_direct_emissions_kgco2e_per_unit_fuel=_opt("fuel_direct_emissions_kgco2e_per_unit_fuel"),
         grid_line_capacity_kw=_opt("grid_line_capacity_kw"),
@@ -134,4 +154,3 @@ def get_params(ds: xr.Dataset) -> Params:
         generator_eff_curve_eff=_opt("generator_eff_curve_eff"),
         curve_point=curve_point,
     )
-

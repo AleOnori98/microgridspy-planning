@@ -683,10 +683,10 @@ def render_generation_planning_optimization_page() -> None:
                     m._initialize_data()
                     m._initialize_vars()
                     m._initialize_constraints()
-                    if formulation_mode == "steady_state":
+                    try:
                         m._initialize_objective()
-                    else:
-                        st.warning("Multi-year objective not implemented yet. Build completed through constraints only.")
+                    except NotImplementedError:
+                        st.warning("Objective not implemented yet. Build completed through constraints only.")
 
                     st.session_state[KEYS["sets"]] = m.sets
                     st.session_state[KEYS["data"]] = m.data
