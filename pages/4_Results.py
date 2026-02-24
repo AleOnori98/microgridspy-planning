@@ -9,6 +9,13 @@ import matplotlib.pyplot as plt
 import xarray as xr
 import streamlit as st
 
+from core.export.results_bundle import ResultsBundle
+from core.export.results_page_helpers import (
+    build_energy_balance_dataframe,
+    export_results_from_bundle,
+    get_results_bundle_from_session,
+)
+
 
 # Keep aligned with your Optimization page
 KEYS = {
@@ -54,19 +61,10 @@ def _get_var_solution(
     name: str,
 ) -> Optional[xr.DataArray]:
     """
-    Preferred source: linopy var.solution
-    Fallback: solution dataset contains the variable already.
+    Preferred source: solution dataset variable
+    Fallback: linopy var.solution
     """
-    # 1) from linopy var
-    try:
-        v = vars_dict.get(name, None)
-        if v is not None and hasattr(v, "solution") and v.solution is not None:
-            # typically an xarray.DataArray
-            return v.solution
-    except Exception:
-        pass
-
-    # 2) fallback from xr solution dataset
+    # 1) from xr solution dataset
     if isinstance(sol_ds, xr.Dataset) and name in sol_ds:
         try:
             da = sol_ds[name]
@@ -74,6 +72,14 @@ def _get_var_solution(
                 return da
         except Exception:
             pass
+
+    # 2) fallback from linopy var
+    try:
+        v = vars_dict.get(name, None)
+        if v is not None and hasattr(v, "solution") and v.solution is not None:
+            return v.solution
+    except Exception:
+        pass
 
     return None
 
@@ -225,6 +231,53 @@ def _plot_dispatch_stack(
     ax.legend(ncols=4, fontsize=9, loc="lower center", bbox_to_anchor=(0.5, 1.25))
 
 
+def _render_quick_inspection(bundle: ResultsBundle) -> None:
+    with st.expander("Quick inspection", expanded=False):
+        data = bundle.data
+        sol = bundle.solution
+        vars_dict = bundle.vars if isinstance(bundle.vars, dict) else {}
+
+        if isinstance(data, xr.Dataset):
+            st.markdown("**Data dims**")
+            st.json({k: int(v) for k, v in data.sizes.items()})
+            st.markdown("**Data variables (first 20)**")
+            st.write(sorted(list(data.data_vars))[:20])
+        else:
+            st.info("No data dataset available.")
+
+        if isinstance(sol, xr.Dataset):
+            st.markdown("**Solution variables (first 20)**")
+            st.write(sorted(list(sol.data_vars))[:20])
+        else:
+            st.info("No solution dataset available on model.")
+
+        st.markdown("**Vars dict size**")
+        st.write(len(vars_dict))
+
+
+def _render_energy_balance_check(bundle: ResultsBundle, tolerance: float = 1e-6) -> None:
+    with st.expander("Energy Balance Check", expanded=False):
+        try:
+            eb = build_energy_balance_dataframe(bundle)
+        except Exception as e:
+            st.info(f"Energy balance unavailable: {e}")
+            return
+
+        max_abs = float(np.max(np.abs(eb["balance_residual"].to_numpy(dtype=float))))
+        mean_res = float(np.mean(eb["balance_residual"].to_numpy(dtype=float)))
+
+        c1, c2 = st.columns(2)
+        c1.metric("Max |residual|", f"{max_abs:.3e}")
+        c2.metric("Mean residual", f"{mean_res:.3e}")
+
+        if max_abs > tolerance:
+            st.warning(f"Residual exceeds tolerance {tolerance:.1e}")
+        else:
+            st.success(f"Residual within tolerance {tolerance:.1e}")
+
+        st.dataframe(eb, use_container_width=True)
+
+
 # -----------------------------------------------------------------------------
 # page
 # -----------------------------------------------------------------------------
@@ -236,13 +289,17 @@ def render_generation_planning_results_page() -> None:
     if project_name:
         st.success(f"Active project: {project_name}")
 
-    data: Optional[xr.Dataset] = st.session_state.get(KEYS["data"])
-    vars_dict: Optional[Dict[str, Any]] = st.session_state.get(KEYS["vars"])
-    sol_ds: Optional[xr.Dataset] = st.session_state.get(KEYS["solution"])
-
-    if not isinstance(data, xr.Dataset) or not isinstance(vars_dict, dict):
+    # Canonical source for all sections: model.solution -> vars -> data via ResultsBundle helper.
+    bundle = get_results_bundle_from_session(st.session_state)
+    if bundle is None or not isinstance(bundle.data, xr.Dataset) or not isinstance(bundle.vars, dict):
         st.error("No results found. Please run the optimization first (solve step).")
         return
+
+    data: xr.Dataset = bundle.data
+    vars_dict: Dict[str, Any] = bundle.vars
+    sol_ds: Optional[xr.Dataset] = bundle.solution if isinstance(bundle.solution, xr.Dataset) else None
+
+    _render_quick_inspection(bundle)
 
     settings = _get_settings(data)
     on_grid = _get_flag(settings, ("grid", "on_grid"), default=False)
@@ -492,6 +549,7 @@ def render_generation_planning_results_page() -> None:
     )
 
     st.pyplot(fig, use_container_width=True)
+    _render_energy_balance_check(bundle, tolerance=1e-6)
 
     # -------------------------------------------------------------------------
     # Cost summary & Cash-flow (objective-consistent)
@@ -989,6 +1047,23 @@ def render_generation_planning_results_page() -> None:
             }).hide(axis="index"),
             use_container_width=True,
         )
+
+    # ======================================================
+    # CSV export (Typical-Year)
+    # ======================================================
+    st.subheader("Export Results")
+    if st.button("Export results to CSV", type="primary"):
+        try:
+            model_obj = st.session_state.get("gp_model_obj")
+            written = export_results_from_bundle(project_name, bundle, model_obj=model_obj)
+            st.success("Export completed.")
+            st.json(written)
+            st.markdown("**Generated files**")
+            for _, p in written.items():
+                if isinstance(p, str) and p.endswith(".csv"):
+                    st.write(p)
+        except Exception as e:
+            st.error(f"Export failed: {e}")
 
 
 

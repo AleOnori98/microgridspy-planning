@@ -13,6 +13,7 @@ import json
 
 from core.typical_year_model.model import SteadyStateModel
 from core.multi_year_model.model import MultiYearModel
+from core.export.results_bundle import build_results_bundle
 from core.io.utils import project_paths
 
 class InputValidationError(RuntimeError):
@@ -70,6 +71,7 @@ KEYS = {
     "solution_summary": "gp_solution_summary",
     "model_obj": "gp_model_obj",
     "log_path": "gp_log_path",
+    "results_bundle": "gp_results_bundle",
 }
 
 
@@ -523,6 +525,24 @@ def _render_minimal_results(solution_summary: Optional[Dict[str, Any]]) -> None:
         st.metric("Objective value", f"{obj:.4g}" if isinstance(obj, (int, float)) else "n/a")
 
 
+def _render_solver_log(log_path_value: Any) -> None:
+    with st.expander("Solver Log", expanded=False):
+        if not log_path_value:
+            st.info("No solver log available for this run.")
+            return
+        p = Path(str(log_path_value))
+        st.write(f"Path: {p}")
+        if not p.exists() or not p.is_file():
+            st.warning("Log path does not exist.")
+            return
+        try:
+            txt = p.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            st.error(f"Could not read solver log: {e}")
+            return
+        st.text_area("Log content", value=txt, height=260)
+
+
 # =============================================================================
 # Page
 # =============================================================================
@@ -656,7 +676,7 @@ def render_generation_planning_optimization_page() -> None:
 
     if run_clicked and ok:
         # reset
-        for k in (KEYS["solution"], KEYS["solution_summary"], KEYS["sets"], KEYS["data"], KEYS["vars"], KEYS["model_obj"], KEYS["log_path"]):
+        for k in (KEYS["solution"], KEYS["solution_summary"], KEYS["sets"], KEYS["data"], KEYS["vars"], KEYS["model_obj"], KEYS["log_path"], KEYS["results_bundle"]):
             st.session_state[k] = None
 
         t0 = time.time()
@@ -671,12 +691,18 @@ def render_generation_planning_optimization_page() -> None:
                 if opt_step == "sets":
                     m._initialize_sets()
                     st.session_state[KEYS["sets"]] = m.sets
+                    st.session_state[KEYS["results_bundle"]] = build_results_bundle(
+                        sets=m.sets, data=None, vars=None, model_obj=None, solution=None, solution_summary=None, solver=solver
+                    )
 
                 elif opt_step == "data":
                     m._initialize_sets()
                     m._initialize_data()
                     st.session_state[KEYS["sets"]] = m.sets
                     st.session_state[KEYS["data"]] = m.data
+                    st.session_state[KEYS["results_bundle"]] = build_results_bundle(
+                        sets=m.sets, data=m.data, vars=None, model_obj=None, solution=None, solution_summary=None, solver=solver
+                    )
 
                 elif opt_step == "build":
                     m._initialize_sets()
@@ -692,6 +718,15 @@ def render_generation_planning_optimization_page() -> None:
                     st.session_state[KEYS["data"]] = m.data
                     st.session_state[KEYS["vars"]] = m.vars
                     st.session_state[KEYS["model_obj"]] = m  # store whole model, not a bool (needed for debugging)
+                    st.session_state[KEYS["results_bundle"]] = build_results_bundle(
+                        sets=m.sets,
+                        data=m.data,
+                        vars=m.vars,
+                        model_obj=m,
+                        solution=getattr(m.model, "solution", None) if m.model is not None else None,
+                        solution_summary=st.session_state.get(KEYS["solution_summary"]),
+                        solver=solver,
+                    )
 
                 else:
                     sol = m.solve_single_objective(
@@ -707,24 +742,35 @@ def render_generation_planning_optimization_page() -> None:
                     st.session_state[KEYS["model_obj"]] = m  # keep for debug
                     st.session_state[KEYS["log_path"]] = str(m._last_log_path) if m._last_log_path else None
                     st.session_state[KEYS["solution_summary"]] = _extract_solution_summary(m)
+                    st.session_state[KEYS["results_bundle"]] = build_results_bundle(
+                        sets=m.sets,
+                        data=m.data,
+                        vars=m.vars,
+                        model_obj=m,
+                        solution=getattr(m.model, "solution", None) if m.model is not None else sol,
+                        solution_summary=st.session_state[KEYS["solution_summary"]],
+                        solver=solver,
+                    )
 
         elapsed = time.time() - t0
         st.success(f"Step '{opt_step}' completed. Runtime: {elapsed:.2f} s")
 
+    _render_solver_log(st.session_state.get(KEYS["log_path"]))
+
     # -------------------------
     # Quick inspection (debugging-friendly)
     # -------------------------
-    st.subheader("Quick inspection")
+    with st.expander("Quick inspection", expanded=False):
+        bundle = st.session_state.get(KEYS["results_bundle"])
+        data_ds = getattr(bundle, "data", None) if bundle is not None else st.session_state.get(KEYS["data"])
+        vars_dict = getattr(bundle, "vars", None) if bundle is not None else st.session_state.get(KEYS["vars"])
+        model_obj = st.session_state.get(KEYS["model_obj"])
 
-    data_ds = st.session_state.get(KEYS["data"])
-    vars_dict = st.session_state.get(KEYS["vars"])
-    model_obj = st.session_state.get(KEYS["model_obj"])
-
-    _show_xr_dataset_debug(data_ds, "Data")
-    _render_variables_debug(data_ds, vars_dict)
-    _render_constraints_debug(model_obj)
-    summary = st.session_state.get(KEYS["solution_summary"])
-    _render_minimal_results(summary)
+        _show_xr_dataset_debug(data_ds, "Data")
+        _render_variables_debug(data_ds, vars_dict)
+        _render_constraints_debug(model_obj)
+        summary = st.session_state.get(KEYS["solution_summary"])
+        _render_minimal_results(summary)
 
 
 

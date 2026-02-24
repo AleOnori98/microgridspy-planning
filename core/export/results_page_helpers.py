@@ -1,0 +1,93 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Dict, Mapping, Optional
+
+import pandas as pd
+import xarray as xr
+
+from core.export.results_bundle import ResultsBundle, build_results_bundle
+from core.export.typical_year_results import (
+    build_dispatch_timeseries_table,
+    build_energy_balance_table,
+    export_typical_year_results,
+)
+from core.io.utils import project_paths
+
+
+def get_results_bundle_from_session(session_state: Mapping[str, Any]) -> Optional[ResultsBundle]:
+    raw = session_state.get("gp_results_bundle")
+    if isinstance(raw, ResultsBundle):
+        model_obj = session_state.get("gp_model_obj")
+        model_sol = getattr(getattr(model_obj, "model", None), "solution", None)
+        if isinstance(model_sol, xr.Dataset):
+            raw.solution = model_sol
+        return raw
+
+    data = session_state.get("gp_data")
+    vars_dict = session_state.get("gp_vars")
+    if not isinstance(data, xr.Dataset) or not isinstance(vars_dict, dict):
+        return None
+
+    return build_results_bundle(
+        sets=session_state.get("gp_sets"),
+        data=data,
+        vars=vars_dict,
+        model_obj=session_state.get("gp_model_obj"),
+        solution=session_state.get("gp_solution"),
+        solution_summary=session_state.get("gp_solution_summary"),
+        solver=None,
+    )
+
+
+def get_var_solution(
+    *,
+    bundle: ResultsBundle,
+    name: str,
+) -> Optional[xr.DataArray]:
+    sol = bundle.solution
+    if isinstance(sol, xr.Dataset) and name in sol:
+        da = sol[name]
+        if isinstance(da, xr.DataArray):
+            return da
+
+    vars_dict = bundle.vars if isinstance(bundle.vars, dict) else {}
+    v = vars_dict.get(name, None)
+    try:
+        if v is not None and hasattr(v, "solution") and isinstance(v.solution, xr.DataArray):
+            return v.solution
+    except Exception:
+        pass
+    return None
+
+
+def build_energy_balance_dataframe(bundle: ResultsBundle) -> pd.DataFrame:
+    if bundle.data is None or not isinstance(bundle.vars, dict):
+        raise RuntimeError("Missing data/vars in ResultsBundle.")
+    dispatch = build_dispatch_timeseries_table(
+        data=bundle.data,
+        vars=bundle.vars,
+        solution=bundle.solution if isinstance(bundle.solution, xr.Dataset) else None,
+    )
+    return build_energy_balance_table(dispatch)
+
+
+def export_results_from_bundle(
+    project_name: str,
+    bundle: ResultsBundle,
+    model_obj: Any = None,
+) -> Dict[str, str]:
+    if bundle.data is None or not isinstance(bundle.vars, dict):
+        raise RuntimeError("Missing data/vars in ResultsBundle.")
+
+    sets_ds = bundle.sets if isinstance(bundle.sets, xr.Dataset) else xr.Dataset()
+    out_dir = project_paths(project_name).results_dir
+    return export_typical_year_results(
+        project_name=project_name,
+        sets=sets_ds,
+        data=bundle.data,
+        model=getattr(model_obj, "model", None),
+        vars=bundle.vars,
+        solution=bundle.solution if isinstance(bundle.solution, xr.Dataset) else None,
+        out_dir=Path(out_dir),
+    )
