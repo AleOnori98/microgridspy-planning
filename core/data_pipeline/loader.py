@@ -7,9 +7,11 @@ import xarray as xr
 from core.data_pipeline.utils import as_str
 from core.data_pipeline.multi_year_loader import load_multi_year_dataset
 from core.data_pipeline.typical_year_loader import (
-    InputValidationError as TypicalInputValidationError,
     load_typical_year_dataset,
 )
+
+class InputValidationError(RuntimeError):
+    pass
 
 
 def _coerce_sets(sets: dict | xr.Dataset) -> xr.Dataset:
@@ -29,11 +31,11 @@ def _coerce_sets(sets: dict | xr.Dataset) -> xr.Dataset:
             try:
                 return xr.Dataset(coords=sets["coords"])
             except Exception as e:
-                raise TypicalInputValidationError(
+                raise InputValidationError(
                     f"initialize_data expects `sets` as an xarray.Dataset. Could not coerce dict['coords'] to Dataset: {e}"
                 )
 
-    raise TypicalInputValidationError("initialize_data expects `sets` as an xarray.Dataset.")
+    raise InputValidationError("initialize_data expects `sets` as an xarray.Dataset.")
 
 
 def load_project_dataset(

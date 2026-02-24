@@ -4,13 +4,8 @@ import warnings
 
 import xarray as xr
 
-from core.multi_year_model.data import (
-    InputValidationError as LegacyInputValidationError,
-    initialize_data as legacy_initialize_data,
-)
-
-
-InputValidationError = LegacyInputValidationError
+class InputValidationError(RuntimeError):
+    pass
 
 
 def _validate_sets(sets: xr.Dataset) -> None:
@@ -69,8 +64,12 @@ def load_multi_year_dataset(project_name: str, sets: xr.Dataset) -> xr.Dataset:
     - Keeps names, values, attrs keys, and file/path expectations unchanged.
     """
     _validate_sets(sets)
-    ds = legacy_initialize_data(project_name, sets)
+    # Import lazily to avoid module import cycle:
+    # core.multi_year_model.data -> core.data_pipeline.loader
+    # -> core.data_pipeline.multi_year_loader -> core.multi_year_model.data
+    from core.multi_year_model.data import _initialize_data_legacy
+
+    ds = _initialize_data_legacy(project_name, sets)
     ds = _align_contract_dims(ds)
     _soft_checks(ds)
     return ds
-
