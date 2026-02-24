@@ -10,6 +10,7 @@ import linopy as lp
 from core.multi_year_model.sets import initialize_sets
 from core.multi_year_model.data import initialize_data
 from core.multi_year_model.variables import initialize_vars
+from core.multi_year_model.constraints import initialize_constraints
 
 
 class InputValidationError(RuntimeError):
@@ -68,7 +69,20 @@ class MultiYearModel:
         self.vars = initialize_vars(self.sets, self.data, self.model)
         self._flags.vars_initialized = True
 
-    def _build_model(self) -> None:
+    def _initialize_constraints(self) -> None:
+        if not self._flags.vars_initialized:
+            self._initialize_vars()
+        if self.model is None:
+            raise RuntimeError("_initialize_constraints: model is not initialized.")
+
+        initialize_constraints(self.sets, self.data, self.vars, self.model)
+        self._flags.constraints_initialized = True
+
+    def _initialize_objective(self) -> None:
+        # Dynamic multi-year objective is still WIP. Keep explicit for UX clarity.
+        raise NotImplementedError("Multi-year objective is not implemented yet.")
+
+    def _build_model(self, build_objective: bool = True) -> None:
         if not self._flags.sets_initialized:
             self._initialize_sets()
         if not self._flags.data_initialized:
@@ -77,6 +91,11 @@ class MultiYearModel:
             self._initialize_linopy_model()
         if not self._flags.vars_initialized:
             self._initialize_vars()
+        if not self._flags.constraints_initialized:
+            self._initialize_constraints()
+        if build_objective:
+            self._initialize_objective()
+            self._flags.model_built = True
 
     # ---------------------------------------------------------------------
     # Optional exports
@@ -128,7 +147,13 @@ class MultiYearModel:
           - (optional) decision var snapshots (res_units, battery_units, generator_units)
         The full numeric solution is also available as self.model.solution after solve.
         """
-        self._build_model()
+        try:
+            self._build_model(build_objective=True)
+        except NotImplementedError as e:
+            raise RuntimeError(
+                "solve_single_objective: multi-year objective is not implemented yet. "
+                "Use build-only flow (sets -> data -> vars -> constraints)."
+            ) from e
         if self.model is None:
             raise RuntimeError("solve_single_objective: linopy model is not initialized.")
 

@@ -6,20 +6,14 @@ meta:
     max_charge_time: hours
     max_discharge_time: hours
     calendar_lifetime: years
-    energy_degradation_rate: per_year
     capacity_degradation_rate: per_year
   context:
     formulation: dynamic
-    multi_scenario: true
+    multi_scenario: false
     scenarios:
     - scenario_1
-    - scenario_2
-    capacity_expansion: true
-    investment_steps:
-    - step: step_1
-      duration_years: 2
-    - step: step_2
-      duration_years: 2
+    capacity_expansion: false
+    investment_steps: null
   notes:
   - Battery cohort differences are allowed only for investment-side parameters (by_step).
   - Technical parameters are step-invariant (shared across cohorts).
@@ -30,24 +24,16 @@ meta:
     with your SOC convention.
   - Degradation is specified as single annual rates (/year), scenario-dependent; no
     year-by-year curves.
-  - Set degradation rates to 0.0 to disable energy and/or capacity degradation effects.
+  - Set degradation rates to 0.0 to disable capacity degradation effects.
 battery:
   label: Battery
   investment:
     by_step:
-      step_1:
+      base:
         nominal_capacity_kwh: 1.0
-        specific_investment_cost_per_kwh: 0.0
-        wacc: 0.0
+        specific_investment_cost_per_kwh: 400
+        wacc: 0.05
         calendar_lifetime_years: 10
-        max_installable_capacity_kwh: null
-        embedded_emissions_kgco2e_per_kwh: 0.0
-      step_2:
-        nominal_capacity_kwh: 1.0
-        specific_investment_cost_per_kwh: 0.0
-        wacc: 0.0
-        calendar_lifetime_years: 10
-        max_installable_capacity_kwh: null
         embedded_emissions_kgco2e_per_kwh: 0.0
   technical:
     charge_efficiency: 1.0
@@ -56,13 +42,9 @@ battery:
     depth_of_discharge: 0.8
     max_discharge_time_hours: 5.0
     max_charge_time_hours: 5.0
+    max_installable_capacity_kwh: null
   operation:
     by_scenario:
       scenario_1:
-        fixed_om_share_per_year: 0.0
-        energy_degradation_rate_per_year: 0.0
-        capacity_degradation_rate_per_year: 0.0
-      scenario_2:
-        fixed_om_share_per_year: 0.0
-        energy_degradation_rate_per_year: 0.0
+        fixed_om_share_per_year: 0.02
         capacity_degradation_rate_per_year: 0.0

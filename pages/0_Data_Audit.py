@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 import xarray as xr
+import json
 
 from core.data_pipeline.loader import load_project_dataset
 from core.io.utils import project_paths
 from core.typical_year_model.sets import initialize_sets
+from core.multi_year_model.sets import initialize_sets as initialize_sets_multi_year
+from core.multi_year_model.model import MultiYearModel
 
 
 REQUIRED_INPUTS = [
@@ -34,6 +37,11 @@ REQUIRED_SETTINGS_KEYS = [
     "fuel",
     "grid",
 ]
+
+def _read_json(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        raise RuntimeError(f"Missing required file: {path}")
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _list_projects(projects_root: Path) -> List[str]:
@@ -105,7 +113,7 @@ def _cost_vars(ds: xr.Dataset) -> List[str]:
 
 def render_data_audit_page() -> None:
     st.title("Data Audit")
-    st.caption("Typical-year data pipeline audit (read-only).")
+    st.caption("Data pipeline audit (read-only).")
 
     projects_root = Path("projects")
     projects = _list_projects(projects_root)
@@ -122,7 +130,11 @@ def render_data_audit_page() -> None:
     project_name = st.selectbox("Select project", options=projects, index=idx)
     st.session_state["active_project"] = project_name
     paths = project_paths(project_name)
+    formulation = _read_json(paths.formulation_json)
+    formulation_mode = str(formulation.get("core_formulation", "steady_state")).strip()
+    loader_mode = "multi_year" if formulation_mode == "dynamic" else "typical_year"
     st.info(f"Auditing project: `{paths.root}`")
+    st.caption(f"Detected formulation mode: `{formulation_mode}`")
 
     with st.expander("Section A: Required Input Files", expanded=True):
         checks = _presence_checks(project_name)
@@ -148,8 +160,11 @@ def render_data_audit_page() -> None:
     ds = None
     with st.expander("Section B: Dataset Load + Summary", expanded=True):
         try:
-            sets = initialize_sets(project_name)
-            ds = load_project_dataset(project_name, sets, mode="typical_year")
+            if loader_mode == "multi_year":
+                sets = initialize_sets_multi_year(project_name)
+            else:
+                sets = initialize_sets(project_name)
+            ds = load_project_dataset(project_name, sets, mode=loader_mode)
         except Exception as e:
             st.error(f"FAIL: Could not load dataset via shared loader: {e}")
             st.stop()
@@ -222,6 +237,26 @@ def render_data_audit_page() -> None:
         else:
             st.success("PASS: required settings keys are present.")
 
+    if loader_mode == "multi_year":
+        with st.expander("Section D: Multi-Year Build-Only Check", expanded=True):
+            if st.button("Build multi-year model (vars+constraints)", type="secondary"):
+                try:
+                    m = MultiYearModel(project_name)
+                    m._initialize_sets()
+                    m._initialize_data()
+                    m._initialize_vars()
+                    m._initialize_constraints()
+
+                    n_vars = len(m.vars or {})
+                    n_constraints = len(m.model.constraints) if (m.model is not None and hasattr(m.model, "constraints")) else 0
+                    st.success("PASS: Build-only completed for multi-year.")
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.metric("# Variables", n_vars)
+                    with c2:
+                        st.metric("# Constraints", n_constraints)
+                except Exception as e:
+                    st.error(f"FAIL: build-only step failed: {e}")
+
 
 render_data_audit_page()
-

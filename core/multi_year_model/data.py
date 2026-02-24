@@ -45,12 +45,15 @@ def _normalize_step_key(k: object) -> str:
       - "1", "2"
       - 1, 2
       - "step_1", "step_2"
+      - "base" (alias/default block)
       - "Step 1" (best effort)
     Returns:
       - "1" or "2" ... (string)
     """
     s = str(k).strip()
     s_low = s.lower().replace(" ", "")
+    if s_low == "base":
+        return "base"
     if s_low.startswith("step_"):
         return s_low.split("step_", 1)[1]
     if s_low.startswith("step"):
@@ -61,7 +64,15 @@ def _normalize_step_key(k: object) -> str:
 
 def _remap_by_step_dict(path: Path, by_step: dict, *, expected_steps: List[str], context: str) -> Dict[str, dict]:
     """
-    Remap a YAML by_step mapping that may be keyed by 'step_1' to expected step labels like '1'.
+    Remap a YAML by_step mapping that may be keyed by:
+      - step labels ('1', '2', ...)
+      - aliases ('step_1', 'step_2', ...)
+      - 'base' (default block)
+
+    Behavior for 'base':
+      - if only one step is expected, 'base' maps to that step
+      - if multiple steps are expected, 'base' is broadcast as default for any missing step
+
     Raises a clear error if after remapping required steps are still missing.
     """
     if not isinstance(by_step, dict):
@@ -72,6 +83,13 @@ def _remap_by_step_dict(path: Path, by_step: dict, *, expected_steps: List[str],
     for k, v in by_step.items():
         nk = _normalize_step_key(k)
         remapped[str(nk)] = v
+
+    # Support human-friendly single/default block in templates:
+    # by_step: {base: {...}}
+    if "base" in remapped:
+        base_block = remapped["base"]
+        for st in expected_steps:
+            remapped.setdefault(st, base_block)
 
     missing = [st for st in expected_steps if st not in remapped]
     if missing:
@@ -398,13 +416,13 @@ def _load_renewables_yaml(
         "specific_investment_cost_per_kw",
         "wacc",
         "grant_share_of_capex",
-        "specific_area_m2_per_kw",
         "embedded_emissions_kgco2e_per_kw",   # embodied per kW installed (investment-side)
     ]
 
     # technical, step-invariant (single technology physics)
     PARAMS_TECHNICAL_INVARIANT = [
         "inverter_efficiency",
+        "specific_area_m2_per_kw",            # physical land-use coefficient (resource-level)
         "max_installable_capacity_kw",        # allow None -> NaN
     ]
 
@@ -459,6 +477,7 @@ def _load_renewables_yaml(
             context=f"resource '{res_label}' investment.by_step",
         )
 
+        legacy_specific_area_by_step: Dict[str, float] = {}
         for st in step_labels:
             blk = inv_by_step[st]
             if not isinstance(blk, dict):
@@ -466,6 +485,12 @@ def _load_renewables_yaml(
                     f"{path.name}: resource '{res_label}' investment.by_step['{st}'] must be a mapping/dict."
                 )
             si = step_to_idx[st]
+            if "specific_area_m2_per_kw" in blk:
+                legacy_specific_area_by_step[st] = _as_float(
+                    blk.get("specific_area_m2_per_kw"),
+                    name=f"{res_label}/investment/{st}/specific_area_m2_per_kw",
+                    default=0.0,
+                )
             for k in PARAMS_INVESTMENT_BY_STEP:
                 if k not in blk:
                     raise InputValidationError(
@@ -482,11 +507,27 @@ def _load_renewables_yaml(
             raise InputValidationError(f"{path.name}: resource '{res_label}' missing/invalid 'technical' mapping.")
 
         for k in PARAMS_TECHNICAL_INVARIANT:
-            if k not in tech_block:
-                raise InputValidationError(
-                    f"{path.name}: missing technical param '{k}' in resource '{res_label}' (technical.{k})."
-                )
-            tech_arr[k][j] = _as_float(tech_block.get(k), name=f"{res_label}/technical/{k}", default=0.0)
+            if k in tech_block:
+                tech_arr[k][j] = _as_float(tech_block.get(k), name=f"{res_label}/technical/{k}", default=0.0)
+                continue
+
+            # Backward compatibility:
+            # allow specific_area_m2_per_kw under investment.by_step, but store as resource-level technical param.
+            if k == "specific_area_m2_per_kw" and len(legacy_specific_area_by_step) > 0:
+                vals = list(legacy_specific_area_by_step.values())
+                v0 = vals[0]
+                if not all(np.isclose(v, v0, rtol=0.0, atol=1e-12) for v in vals):
+                    raise InputValidationError(
+                        f"{path.name}: resource '{res_label}' has step-varying specific_area_m2_per_kw in investment.by_step. "
+                        "This parameter must be step-invariant; move it to technical.specific_area_m2_per_kw "
+                        "or use the same value across all steps."
+                    )
+                tech_arr[k][j] = v0
+                continue
+
+            raise InputValidationError(
+                f"{path.name}: missing technical param '{k}' in resource '{res_label}' (technical.{k})."
+            )
 
         # ---- operation.by_scenario (NOT step-dependent)
         op_block = item.get("operation", None)

@@ -309,7 +309,8 @@ def initialize_constraints(
     if on_grid and grid_imp is not None:
         e_grid = (grid_imp * grid_eta).sum("period")
     else:
-        e_grid = xr.zeros_like(e_res)
+        # e_res is a linopy expression, not an xarray object; keep zero as scalar.
+        e_grid = 0.0
 
     if enforcement == "scenario_wise":
         model.add_constraints(e_ll <= (max_ll_frac * e_demand), name="max_lost_load_share")
@@ -342,4 +343,3 @@ def initialize_constraints(
     if "resource" in area_used.dims:
         area_used = area_used.sum("resource")
     model.add_constraints(area_used <= land_m2, name="land_availability")
-

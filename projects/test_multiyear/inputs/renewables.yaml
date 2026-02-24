@@ -5,23 +5,16 @@ meta:
     production_subsidy: currency_per_kWh
     embedded_emissions: kgCO2e_per_kW
     specific_area: m2_per_kW
-    energy_degradation_rate: per_year
     capacity_degradation_rate: per_year
   context:
     formulation: dynamic
-    multi_scenario: true
+    multi_scenario: false
     scenarios:
     - scenario_1
-    - scenario_2
-    capacity_expansion: true
-    investment_steps:
-    - step: '1'
-      duration_years: 2
-    - step: '2'
-      duration_years: 2
+    capacity_expansion: false
+    investment_steps: null
     inv_step_keys:
-    - step_1
-    - step_2
+    - base
   notes:
   - All values are defined per renewable source.
   - 'Investment-side parameters MAY vary by investment step (cohorts): CAPEX, WACC,
@@ -33,42 +26,27 @@ meta:
   - O&M is expressed as a share of total CAPEX per year.
   - Degradation is specified as a single annual rate (/year), scenario-dependent and
     step-invariant.
-  - Set degradation rates to 0.0 to disable energy and/or capacity degradation effects.
+  - Set degradation rates to 0.0 to disable capacity degradation effects.
 renewables:
 - id: res_1
   conversion_technology: Solar PV
   resource: Solar
   investment:
     by_step:
-      step_1:
+      base:
         nominal_capacity_kw: 1.0
-        specific_investment_cost_per_kw: 0.0
-        wacc: 0.0
+        specific_investment_cost_per_kw: 800
+        wacc: 0.05
         grant_share_of_capex: 0.0
         lifetime_years: 25
-        specific_area_m2_per_kw: 0.0
-        max_installable_capacity_kw: null
-        embedded_emissions_kgco2e_per_kw: 0.0
-      step_2:
-        nominal_capacity_kw: 1.0
-        specific_investment_cost_per_kw: 0.0
-        wacc: 0.0
-        grant_share_of_capex: 0.0
-        lifetime_years: 25
-        specific_area_m2_per_kw: 0.0
-        max_installable_capacity_kw: null
         embedded_emissions_kgco2e_per_kw: 0.0
   technical:
     inverter_efficiency: 1.0
+    specific_area_m2_per_kw: null
+    max_installable_capacity_kw: null
   operation:
     by_scenario:
       scenario_1:
-        fixed_om_share_per_year: 0.0
+        fixed_om_share_per_year: 0.02
         production_subsidy_per_kwh: 0.0
-        energy_degradation_rate_per_year: 0.0
-        capacity_degradation_rate_per_year: 0.0
-      scenario_2:
-        fixed_om_share_per_year: 0.0
-        production_subsidy_per_kwh: 0.0
-        energy_degradation_rate_per_year: 0.0
         capacity_degradation_rate_per_year: 0.0

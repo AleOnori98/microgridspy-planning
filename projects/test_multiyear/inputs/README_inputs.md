@@ -10,9 +10,9 @@ This folder contains user-editable input templates.
   - Row 2: year labels
 - A meta column `meta/hour` provides the hour index (0..8759).
 
-Scenarios: scenario_1, scenario_2
+Scenarios: scenario_1
 
-Years: 2026, 2027, 2028, 2029
+Years: 2026, 2027, 2028, 2029, 2030
 
 ## resource_availability.csv
 - Hourly **resource availability** template (8760 rows).
@@ -23,9 +23,9 @@ Years: 2026, 2027, 2028, 2029
   - Row 3: resource labels
 - A meta column `meta/hour` provides the hour index (0..8759).
 
-Scenarios: scenario_1, scenario_2
+Scenarios: scenario_1
 
-Years: 2026, 2027, 2028, 2029
+Years: 2026, 2027, 2028, 2029, 2030
 
 Resources: Solar
 

@@ -2,30 +2,25 @@
   "project_name": "test_multiyear",
   "description": "",
   "module": "generation_planning",
-  "created_at": "2026-02-23T16:00:01.139678Z",
+  "created_at": "2026-02-24T16:20:12.816056Z",
   "core_formulation": "dynamic",
   "system_type": "off_grid",
   "on_grid": false,
   "grid_allow_export": false,
   "unit_commitment": false,
   "start_year_label": "2026",
-  "time_horizon_years": 4,
+  "time_horizon_years": 5,
   "social_discount_rate": 0.05,
-  "capacity_expansion": true,
-  "investment_steps_years": [
-    2,
-    2
-  ],
+  "capacity_expansion": false,
+  "investment_steps_years": null,
   "multi_scenario": {
-    "enabled": true,
-    "n_scenarios": 2,
+    "enabled": false,
+    "n_scenarios": 1,
     "scenario_labels": [
-      "scenario_1",
-      "scenario_2"
+      "scenario_1"
     ],
     "scenario_weights": [
-      0.5,
-      0.5
+      1.0
     ]
   },
   "optimization_constraints": {
