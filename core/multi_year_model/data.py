@@ -1,15 +1,23 @@
 # generation_planning/modeling/data.py
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
-from typing import Any, Dict, Sequence, Optional, List, Tuple
+from typing import Any, Dict, Optional, List, Tuple
 
-import json
 import numpy as np
 import pandas as pd
 import xarray as xr
-import yaml
 
+from core.data_pipeline.utils import (
+    as_float,
+    as_float_or_nan,
+    as_str,
+    broadcast_to_scenario,
+    normalize_weights,
+    read_json_or_raise,
+    read_yaml_or_raise,
+)
 from core.io.utils import project_paths, simulate_grid_availability_dynamic
 
 
@@ -20,75 +28,13 @@ class InputValidationError(RuntimeError):
 # -----------------------------------------------------------------------------
 # helpers
 # -----------------------------------------------------------------------------
-def _read_json(path: Path) -> Dict[str, Any]:
-    """Read and parse JSON file, raising InputValidationError on failure."""
-    if not path.exists():
-        raise InputValidationError(f"Missing required file: {path}")
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception as e:
-        raise InputValidationError(f"Cannot parse JSON: {path}\nerror: {e}")
-    
-def _read_yaml(path: Path) -> Dict[str, Any]:
-    """Read and parse YAML file, raising InputValidationError on failure."""
-    if not path.exists():
-        raise InputValidationError(f"Missing required file: {path}")
-    try:
-        with path.open("r", encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
-    except Exception as e:
-        raise InputValidationError(f"Cannot parse YAML: {path}\nerror: {e}")
-
-def _as_float(x: Any, *, name: str, default: float = 0.0) -> float:
-    """Convert x to float, with default if None. Raise InputValidationError on failure."""
-    if x is None:
-        return float(default)
-    try:
-        return float(x)
-    except Exception as e:
-        raise InputValidationError(f"Invalid value for '{name}': {x!r} (error: {e})")
-    
-def _as_float_or_nan(x: Any, *, name: str) -> float:
-    """Convert x to float, or NaN if None. Raise InputValidationError on failure."""
-    if x is None:
-        return float("nan")
-    try:
-        return float(x)
-    except Exception as e:
-        raise InputValidationError(f"Invalid numeric value for '{name}': {x!r} (error: {e})")
-
-
-def _as_str(x: Any, *, name: str, default: str = "") -> str:
-    """Convert x to str, with default if None. Raise InputValidationError on failure."""
-    if x is None:
-        return default
-    try:
-        return str(x)
-    except Exception as e:
-        raise InputValidationError(f"Invalid value for '{name}': {x!r} (error: {e})")
-
-def _normalize_weights(weights: Sequence[float], n: int) -> list[float]:
-    """Normalize a list of weights to sum to 1.0 over n items."""
-    if n <= 0:
-        return [1.0]
-    w = [float(x) for x in (weights or [])]
-    if len(w) != n:
-        w = [1.0 / n] * n
-    s = float(sum(w))
-    if s <= 0:
-        return [1.0 / n] * n
-    return [wi / s for wi in w]
-
-def _broadcast_to_scenario(value: xr.DataArray, scenario_coord: xr.DataArray) -> xr.DataArray:
-    """Broadcast a scalar DataArray to scenario dimension."""
-    if value.ndim != 0:
-        return value
-    return xr.DataArray(
-        np.full((scenario_coord.size,), float(value.values)),
-        coords={"scenario": scenario_coord},
-        dims=("scenario",),
-        name=value.name,
-        attrs=dict(value.attrs or {}))
+_read_json = partial(read_json_or_raise, error_cls=InputValidationError)
+_read_yaml = partial(read_yaml_or_raise, error_cls=InputValidationError)
+_as_float = partial(as_float, error_cls=InputValidationError)
+_as_float_or_nan = partial(as_float_or_nan, error_cls=InputValidationError)
+_as_str = partial(as_str, error_cls=InputValidationError)
+_normalize_weights = normalize_weights
+_broadcast_to_scenario = broadcast_to_scenario
 
 def _normalize_step_key(k: object) -> str:
     """
