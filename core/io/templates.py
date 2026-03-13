@@ -433,34 +433,47 @@ def _write_renewables_yaml(path: Path, settings: TemplateSettings, overwrite: bo
         )
 
     # -----------------------------
-    # META: units + notes
+    # META: units + descriptions
     # -----------------------------
     units = {
-        "nominal_capacity": "kW",
-        "specific_investment_cost": "currency_per_kW",
-        "production_subsidy": "currency_per_kWh",
-        "embedded_emissions": "kgCO2e_per_kW",
-        "specific_area": "m2_per_kW",
+        "res_nominal_capacity_kw": "kW",
+        "res_specific_investment_cost_per_kw": "currency_per_kW",
+        "res_wacc": "-",
+        "res_grant_share_of_capex": "share",
+        "res_lifetime_years": "years",
+        "res_embedded_emissions_kgco2e_per_kw": "kgCO2e_per_kW",
+        "res_inverter_efficiency": "-",
+        "res_specific_area_m2_per_kw": "m2_per_kW",
+        "res_max_installable_capacity_kw": "kW",
+        "res_fixed_om_share_per_year": "share_per_year",
+        "res_production_subsidy_per_kwh": "currency_per_kWh",
     }
     if is_dynamic:
-        units.update(
-            {
-                "capacity_degradation_rate": "per_year",
-            }
-        )
+        units["res_capacity_degradation_rate_per_year"] = "per_year"
 
-    notes = [
-        "All values are defined per renewable source.",
-        "Investment-side parameters MAY vary by investment step (cohorts): CAPEX, WACC, lifetime, constraints, embodied emissions.",
-        "Technical parameters are step-invariant (single physics for the technology, no cohort dispatch).",
-        "Operational parameters MAY vary by scenario, but are NOT step-dependent (to keep dispatch dimensions compact and linear).",
-        "O&M is expressed as a share of total CAPEX per year.",
-    ]
+    description = {
+        "summary": (
+            "Renewable inputs define cohort-dependent investment parameters, shared technical assumptions, "
+            "and scenario-dependent operating parameters."
+        ),
+        "parameters": {
+            "res_nominal_capacity_kw": "Nominal capacity represented by one renewable unit.",
+            "res_specific_investment_cost_per_kw": "Specific investment cost of installed renewable capacity.",
+            "res_wacc": "Weighted average cost of capital used for annualizing renewable CAPEX.",
+            "res_grant_share_of_capex": "Fraction of renewable CAPEX covered by grants or subsidies.",
+            "res_lifetime_years": "Technical/economic lifetime used for replacement and annuity calculations.",
+            "res_embedded_emissions_kgco2e_per_kw": "Embodied emissions associated with installing renewable capacity.",
+            "res_inverter_efficiency": "Conversion efficiency applied to renewable output.",
+            "res_specific_area_m2_per_kw": "Land requirement per unit of renewable installed capacity.",
+            "res_max_installable_capacity_kw": "Upper bound on renewable installed capacity for the resource.",
+            "res_fixed_om_share_per_year": "Fixed annual O&M cost expressed as a share of renewable CAPEX.",
+            "res_production_subsidy_per_kwh": "Operating subsidy earned per unit of renewable generation.",
+        },
+    }
     if is_dynamic:
-        notes += [
-            "Degradation is specified as a single annual rate (/year), scenario-dependent and step-invariant.",
-            "Set degradation rates to 0.0 to disable capacity degradation effects.",
-        ]
+        description["parameters"]["res_capacity_degradation_rate_per_year"] = (
+            "Annual reduction in effective renewable capacity used in the dynamic formulation."
+        )
 
     payload = {
         "meta": {
@@ -473,7 +486,7 @@ def _write_renewables_yaml(path: Path, settings: TemplateSettings, overwrite: bo
                 "investment_steps": steps_meta,
                 "inv_step_keys": step_keys,  # helpful for debugging template vs sets
             },
-            "notes": notes,
+            "description": description,
         },
         "renewables": renewables_list,
     }
@@ -580,15 +593,22 @@ def _write_battery_yaml(path: Path, settings: TemplateSettings, overwrite: bool 
     payload = {
         "meta": {
             "units": {
-                "nominal_capacity": "kWh",
-                "specific_investment_cost": "currency_per_kWh",
-                "embedded_emissions": "kgCO2e_per_kWh",
-                "max_charge_time": "hours",
-                "max_discharge_time": "hours",
-                "calendar_lifetime": "years",
+                "battery_nominal_capacity_kwh": "kWh",
+                "battery_specific_investment_cost_per_kwh": "currency_per_kWh",
+                "battery_wacc": "-",
+                "battery_calendar_lifetime_years": "years",
+                "battery_embedded_emissions_kgco2e_per_kwh": "kgCO2e_per_kWh",
+                "battery_charge_efficiency": "-",
+                "battery_discharge_efficiency": "-",
+                "battery_initial_soc": "share",
+                "battery_depth_of_discharge": "share",
+                "battery_max_discharge_time_hours": "hours",
+                "battery_max_charge_time_hours": "hours",
+                "battery_max_installable_capacity_kwh": "kWh",
+                "battery_fixed_om_share_per_year": "share_per_year",
                 **(
                     {
-                        "capacity_degradation_rate": "per_year",
+                        "battery_capacity_degradation_rate_per_year": "per_year",
                     }
                     if is_dynamic
                     else {}
@@ -601,22 +621,36 @@ def _write_battery_yaml(path: Path, settings: TemplateSettings, overwrite: bool 
                 "capacity_expansion": capexp,
                 "investment_steps": steps_meta,
             },
-            "notes": [
-                "Battery cohort differences are allowed only for investment-side parameters (by_step).",
-                "Technical parameters are step-invariant (shared across cohorts).",
-                "Operation parameters are scenario-dependent only (not step-dependent).",
-                "O&M is expressed as a share of total CAPEX per year.",
-                "initial_soc is expressed as fraction of usable capacity (0..1).",
-                "depth_of_discharge defines the usable fraction of nominal capacity; ensure consistency with your SOC convention.",
-                *(
-                    [
-                        "Degradation is specified as single annual rates (/year), scenario-dependent; no year-by-year curves.",
-                        "Set degradation rates to 0.0 to disable capacity degradation effects.",
-                    ]
-                    if is_dynamic
-                    else []
+            "description": {
+                "summary": (
+                    "Battery inputs define cohort-dependent investment data, shared technical behavior, "
+                    "and scenario-dependent operating assumptions."
                 ),
-            ],
+                "parameters": {
+                    "battery_nominal_capacity_kwh": "Nominal energy capacity represented by one battery unit.",
+                    "battery_specific_investment_cost_per_kwh": "Specific investment cost of battery capacity.",
+                    "battery_wacc": "Weighted average cost of capital used for battery annuities.",
+                    "battery_calendar_lifetime_years": "Calendar lifetime used for battery replacement economics.",
+                    "battery_embedded_emissions_kgco2e_per_kwh": "Embodied emissions associated with battery capacity.",
+                    "battery_charge_efficiency": "Battery charging efficiency.",
+                    "battery_discharge_efficiency": "Battery discharging efficiency.",
+                    "battery_initial_soc": "Initial state of charge as a share of usable capacity.",
+                    "battery_depth_of_discharge": "Usable fraction of nominal battery capacity.",
+                    "battery_max_discharge_time_hours": "Minimum time needed to fully discharge at nominal power.",
+                    "battery_max_charge_time_hours": "Minimum time needed to fully charge at nominal power.",
+                    "battery_max_installable_capacity_kwh": "Upper bound on total installed battery capacity.",
+                    "battery_fixed_om_share_per_year": "Fixed annual O&M cost expressed as a share of battery CAPEX.",
+                    **(
+                        {
+                            "battery_capacity_degradation_rate_per_year": (
+                                "Annual reduction in effective battery capacity in the dynamic formulation."
+                            )
+                        }
+                        if is_dynamic
+                        else {}
+                    ),
+                },
+            },
         },
         "battery": {
             "label": _safe_battery_label(settings),
@@ -733,20 +767,16 @@ def _write_generator_yaml(path: Path, settings: TemplateSettings, overwrite: boo
 
         if not is_dynamic:
             base["fuel_cost_per_unit_fuel"] = 0.0               # currency per unit fuel (constant typical-year)
-            base["notes"] = [
-                "Typical-year formulation: fuel cost is a single constant value.",
-                "Ensure unit consistency across LHV, emissions factor, and fuel cost (same unit fuel).",
-            ]
+            base["description"] = (
+                "Typical-year fuel inputs use a single constant fuel cost per unit fuel."
+            )
             return base
 
         # dynamic
         base["by_year_cost_per_unit_fuel"] = [0.0 for _ in years]  # list aligned with year_labels_for_fuel_cost
-        base["notes"] = [
-            "Multi-year formulation: provide one fuel cost value per year label (order matters).",
-            "If you want constant fuel cost, repeat the same value across the list.",
-            "Fuel cost varies by year (not by investment step).",
-            "Ensure unit consistency across LHV, emissions factor, and fuel cost (same unit fuel).",
-        ]
+        base["description"] = (
+            "Multi-year fuel inputs use one fuel cost value per model year label; repeat values for flat trajectories."
+        )
         return base
 
     # -------------------------------------------------------------------------
@@ -767,46 +797,56 @@ def _write_generator_yaml(path: Path, settings: TemplateSettings, overwrite: boo
     fuel_by_scenario = {str(s): _default_fuel_block() for s in scenarios}
 
     # -------------------------------------------------------------------------
-    # META: units + notes (update wording to match new schema)
+    # META: units + descriptions (update wording to match new schema)
     # -------------------------------------------------------------------------
     units = {
-        "nominal_capacity": "kW",
-        "specific_investment_cost": "currency_per_kW",
-        "embedded_emissions": "kgCO2e_per_kW",
-        "nominal_efficiency": "-",
-        "fuel_lhv": "kWh_per_unit_fuel",
-        "fuel_emissions": "kgCO2e_per_unit_fuel",
+        "generator_nominal_capacity_kw": "kW",
+        "generator_lifetime_years": "years",
+        "generator_specific_investment_cost_per_kw": "currency_per_kW",
+        "generator_wacc": "-",
+        "generator_embedded_emissions_kgco2e_per_kw": "kgCO2e_per_kW",
+        "generator_nominal_efficiency_full_load": "-",
+        "generator_max_installable_capacity_kw": "kW",
+        "generator_fixed_om_share_per_year": "share_per_year",
+        "fuel_lhv_kwh_per_unit_fuel": "kWh_per_unit_fuel",
+        "fuel_direct_emissions_kgco2e_per_unit_fuel": "kgCO2e_per_unit_fuel",
     }
     if is_dynamic:
         units.update(
             {
-                "capacity_degradation_rate": "per_year",
-                "fuel_cost_by_year": "currency_per_unit_fuel (list aligned with year labels)",
+                "generator_capacity_degradation_rate_per_year": "per_year",
+                "fuel_cost_by_year": "currency_per_unit_fuel_by_year",
             }
         )
     else:
-        units.update({"fuel_cost": "currency_per_unit_fuel"})
+        units.update({"fuel_fuel_cost_per_unit_fuel": "currency_per_unit_fuel"})
 
-    notes = [
-        "Generator investment-side parameters are scenario-invariant and may vary by investment step (cohorts).",
-        "Generator technical parameters are step-invariant (single block under generator.technical).",
-        "Generator operation parameters are scenario-dependent and do NOT vary by investment step.",
-        "O&M is expressed as a share of total CAPEX per year.",
-        "efficiency_curve_csv is optional. If null/empty, constant efficiency equal to nominal_efficiency_full_load is assumed.",
-        "If provided, efficiency_curve_csv should be a path to a CSV file (recommended relative to inputs/, e.g. 'generator_efficiency_curve.csv').",
-        "The CSV must contain columns: 'Relative Power Output [-]' and 'Efficiency [-]'.",
-        "Relative Power Output [-] should span (at least include) 1, and at 100% the Efficiency [-] should match nominal_efficiency_full_load.",
-    ]
+    description = {
+        "summary": (
+            "Generator inputs define cohort-dependent investment data, shared technical behavior, "
+            "scenario-dependent operating assumptions, and scenario fuel properties."
+        ),
+        "parameters": {
+            "generator_nominal_capacity_kw": "Nominal power represented by one generator unit.",
+            "generator_lifetime_years": "Generator lifetime used for replacement and annuity calculations.",
+            "generator_specific_investment_cost_per_kw": "Specific generator investment cost.",
+            "generator_wacc": "Weighted average cost of capital used for generator annuities.",
+            "generator_embedded_emissions_kgco2e_per_kw": "Embodied emissions associated with generator capacity.",
+            "generator_nominal_efficiency_full_load": "Generator efficiency at full load when no partial-load curve is used.",
+            "generator_max_installable_capacity_kw": "Upper bound on installed generator capacity.",
+            "generator_fixed_om_share_per_year": "Fixed annual O&M cost expressed as a share of generator CAPEX.",
+            "fuel_lhv_kwh_per_unit_fuel": "Lower heating value of the fuel.",
+            "fuel_direct_emissions_kgco2e_per_unit_fuel": "Direct combustion emissions per unit of fuel.",
+            "fuel_fuel_cost_per_unit_fuel": "Fuel price in the steady-state formulation.",
+        },
+    }
     if is_dynamic:
-        notes += [
-            "Degradation is specified as a single annual rate (-/year), scenario-dependent.",
-            "Fuel cost is provided as a yearly list aligned with year_labels_for_fuel_cost; no step-wise fuel cost is supported.",
-        ]
-    else:
-        notes += [
-            "Typical-year formulation: degradation parameters are omitted (not applicable).",
-            "Typical-year formulation: fuel cost is a single constant value.",
-        ]
+        description["parameters"]["generator_capacity_degradation_rate_per_year"] = (
+            "Annual reduction in effective generator capacity in the dynamic formulation."
+        )
+        description["parameters"]["fuel_cost_by_year"] = (
+            "Fuel price trajectory aligned with the dynamic model year labels."
+        )
 
     payload = {
         "meta": {
@@ -820,7 +860,7 @@ def _write_generator_yaml(path: Path, settings: TemplateSettings, overwrite: boo
                 "year_labels_for_fuel_cost": list(map(str, years)),
                 "efficiency_curve_path_base": "inputs/",
             },
-            "notes": notes,
+            "description": description,
         },
         "generator": {
             "label": _safe_generator_label(settings),
@@ -919,6 +959,8 @@ def _write_grid_yaml(path: Path, settings: TemplateSettings, overwrite: bool = F
             "line": {
                 "capacity_kw": 0.0,                 # kW (grid import/export limit)
                 "transmission_efficiency": 1.0,     # - (0..1), scenario dependent
+                "renewable_share": 0.0,             # share (0..1) of imported electricity counted as renewable
+                "emissions_factor_kgco2e_per_kwh": 0.0,  # kgCO2e per delivered kWh imported from grid
             },
             "outages": {
                 "average_outages_per_year": 0.0,         # events/year
@@ -928,6 +970,7 @@ def _write_grid_yaml(path: Path, settings: TemplateSettings, overwrite: bool = F
                 # Default matches your previous constants: scale_od = 36/60, shape_od = 0.56
                 "outage_scale_od_hours": 36 / 60,        # hours
                 "outage_shape_od": 0.56,                 # -
+                "outage_seed": 0,                        # deterministic seed for generated availability
             },
         }
 
@@ -962,34 +1005,42 @@ def _write_grid_yaml(path: Path, settings: TemplateSettings, overwrite: bool = F
                 },
             },
             "units": {
-                "line_capacity": "kW",
-                "transmission_efficiency": "-",
-                "average_outages_per_year": "events_per_year",
-                "average_outage_duration": "minutes",
-                "outage_scale_od": "hours",     
-                "outage_shape_od": "-",         
-                "first_year_connection": "year_label (int, dynamic only)" if is_dynamic else None,
+                "grid_line_capacity_kw": "kW",
+                "grid_transmission_efficiency": "-",
+                "grid_renewable_share": "share",
+                "grid_emissions_factor_kgco2e_per_kwh": "kgCO2e_per_kWh",
+                "grid_avg_outages_per_year": "events_per_year",
+                "grid_avg_outage_duration_minutes": "minutes",
+                "grid_outage_scale_od_hours": "hours",
+                "grid_outage_shape_od": "-",
+                "grid_outage_seed": "integer_seed",
+                "grid_first_year_connection": "year_label" if is_dynamic else None,
             },
-            "notes": [
-                "This file is only used when system_type is 'on_grid'.",
-                "Grid import/export prices are provided in separate CSV files stored in the inputs folder.",
-                "grid_import_price.csv is required for on-grid projects.",
-                "grid_export_price.csv is required only if allow_export=true; otherwise it is ignored.",
-                "Price CSVs are hourly (8760 rows) and use a two-level header: (scenario, year).",
-                "A meta/hour column is included in the CSV templates and should remain unchanged.",
-                "The grid availability matrix is generated by the backend from outage parameters (no user template).",
-                "outage_scale_od_hours and outage_shape_od parameterize the Weibull distribution used to sample outage durations.",
-            ]
-            + (
-                [
-                    "Dynamic formulation: first_year_connection specifies when the grid becomes available within the horizon (scenario-dependent).",
-                    "If first_year_connection is null, the backend should treat the system as grid-connected for the full horizon (recommended to avoid ambiguity).",
-                ]
-                if is_dynamic
-                else [
-                    "Typical-year formulation: first_year_connection is omitted (grid assumed connected for the representative year).",
-                ]
-            ),
+            "description": {
+                "summary": (
+                    "Grid inputs define line limits, outage statistics, and connection timing for on-grid configurations."
+                ),
+                "parameters": {
+                    "grid_line_capacity_kw": "Maximum import/export capacity of the grid interconnection.",
+                    "grid_transmission_efficiency": "Efficiency applied to power exchanged with the grid.",
+                    "grid_renewable_share": "Share of delivered imported electricity counted as renewable in policy metrics.",
+                    "grid_emissions_factor_kgco2e_per_kwh": "Scope 2 emissions factor applied to delivered imported electricity.",
+                    "grid_avg_outages_per_year": "Average number of grid outages per year.",
+                    "grid_avg_outage_duration_minutes": "Average outage duration used by the outage simulator.",
+                    "grid_outage_scale_od_hours": "Weibull scale parameter for outage duration sampling.",
+                    "grid_outage_shape_od": "Weibull shape parameter for outage duration sampling.",
+                    "grid_outage_seed": "Deterministic seed used when generating the derived grid availability matrix.",
+                    **(
+                        {
+                            "grid_first_year_connection": (
+                                "First model year in which the grid connection becomes available."
+                            )
+                        }
+                        if is_dynamic
+                        else {}
+                    ),
+                },
+            },
         },
         "grid": {
             "by_scenario": by_scenario,
