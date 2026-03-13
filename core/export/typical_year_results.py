@@ -53,6 +53,12 @@ def _require_da(name: str, da: Optional[xr.DataArray]) -> xr.DataArray:
     return da
 
 
+def _sel_scenario_or_self(x: Any, scenario: str) -> Any:
+    if isinstance(x, xr.DataArray) and "scenario" in x.dims:
+        return x.sel(scenario=scenario)
+    return x
+
+
 def build_dispatch_timeseries_table(
     *,
     data: xr.Dataset,
@@ -221,13 +227,34 @@ def build_kpis_table(
         lost_load = float(df_s["lost_load"].sum())
         served = total_demand - lost_load
         total_res = float(df_s["res_generation_total"].sum())
-        ren_pen = (total_res / (total_res + float(df_s["generator_generation"].sum()) + float(df_s["grid_import"].sum()))) if (total_res + float(df_s["generator_generation"].sum()) + float(df_s["grid_import"].sum())) > 0 else 0.0
+        grid_eta = float(p.grid_transmission_efficiency.sel(scenario=s)) if p.grid_transmission_efficiency is not None else 1.0
+        grid_ren_share = float(p.grid_renewable_share.sel(scenario=s)) if p.grid_renewable_share is not None else 0.0
+        grid_delivered = float(df_s["grid_import"].sum()) * grid_eta
+        grid_renewable = grid_delivered * grid_ren_share
+        ren_denom = total_res + float(df_s["generator_generation"].sum()) + grid_delivered
+        ren_num = total_res + grid_renewable
+        ren_pen = (ren_num / ren_denom) if ren_denom > 0 else 0.0
         ll_frac = (lost_load / total_demand) if total_demand > 0 else 0.0
 
         fuel = float(fuel_cons.sel(scenario=s).sum("period")) if isinstance(fuel_cons, xr.DataArray) else 0.0
-        emissions = fuel * float(p.fuel_direct_emissions_kgco2e_per_unit_fuel.sel(scenario=s))
+        scope1_emissions = fuel * float(_sel_scenario_or_self(p.fuel_direct_emissions_kgco2e_per_unit_fuel, s))
+        grid_em_factor = (
+            float(_sel_scenario_or_self(p.grid_emissions_factor_kgco2e_per_kwh, s))
+            if p.grid_emissions_factor_kgco2e_per_kwh is not None
+            else 0.0
+        )
+        scope2_emissions = grid_delivered * grid_em_factor
+        res_emb = _sel_scenario_or_self(p.res_embedded_emissions_kgco2e_per_kw, s)
+        gen_emb = _sel_scenario_or_self(p.generator_embedded_emissions_kgco2e_per_kw, s)
+        bat_emb = _sel_scenario_or_self(p.battery_embedded_emissions_kgco2e_per_kwh, s)
+        scope3_emissions = (
+            float(((cap_res_kw * res_emb) / p.res_lifetime_years).sum("resource"))
+            + float((cap_gen_kw * gen_emb) / p.generator_lifetime_years)
+            + float((cap_bat_kwh * bat_emb) / p.battery_calendar_lifetime_years)
+        )
+        total_emissions = scope1_emissions + scope2_emissions + scope3_emissions
 
-        fuel_cost = fuel * float(p.fuel_fuel_cost_per_unit_fuel.sel(scenario=s))
+        fuel_cost = fuel * float(_sel_scenario_or_self(p.fuel_fuel_cost_per_unit_fuel, s))
         grid_cost = 0.0
         if p.grid_import_price is not None and "scenario" in p.grid_import_price.dims:
             imp_price = p.grid_import_price.sel(scenario=s).values.astype(float)
@@ -235,8 +262,8 @@ def build_kpis_table(
         if p.grid_export_price is not None and "scenario" in p.grid_export_price.dims:
             exp_price = p.grid_export_price.sel(scenario=s).values.astype(float)
             grid_cost -= float((df_s["grid_export"].to_numpy(dtype=float) * exp_price).sum())
-        ll_cost = lost_load * float(p.lost_load_cost_per_kwh.sel(scenario=s) if "scenario" in p.lost_load_cost_per_kwh.dims else p.lost_load_cost_per_kwh)
-        em_cost = emissions * float(p.emission_cost_per_kgco2e.sel(scenario=s) if "scenario" in p.emission_cost_per_kgco2e.dims else p.emission_cost_per_kgco2e)
+        ll_cost = lost_load * float(_sel_scenario_or_self(p.lost_load_cost_per_kwh, s))
+        em_cost = total_emissions * float(_sel_scenario_or_self(p.emission_cost_per_kgco2e, s))
 
         rows.append(
             {
@@ -246,9 +273,13 @@ def build_kpis_table(
                 "lost_load_kwh": lost_load,
                 "lost_load_fraction": ll_frac,
                 "total_res_kwh": total_res,
+                "grid_renewable_kwh": grid_renewable,
                 "renewable_penetration": ren_pen,
                 "fuel_consumption": fuel,
-                "emissions_kgco2e": emissions,
+                "scope1_emissions_kgco2e": scope1_emissions,
+                "scope2_emissions_kgco2e": scope2_emissions,
+                "scope3_emissions_kgco2e": scope3_emissions,
+                "emissions_kgco2e": total_emissions,
                 "investment_annuity_cost": annuity,
                 "fuel_cost": fuel_cost,
                 "grid_net_cost": grid_cost,

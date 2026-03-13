@@ -270,8 +270,16 @@ def build_yearly_kpis_table_multi_year(
         res = float(g["res_generation_total"].sum())
         gen = float(g["generator_generation"].sum())
         imp = float(g["grid_import"].sum())
-        denom = res + gen + imp
-        ren_pen = (res / denom) if denom > 0 else 0.0
+        grid_eta = 1.0
+        if p.grid_transmission_efficiency is not None:
+            grid_eta = float(p.grid_transmission_efficiency.sel(scenario=scenario))
+        grid_ren_share = 0.0
+        if p.grid_renewable_share is not None:
+            grid_ren_share = float(p.grid_renewable_share.sel(scenario=scenario))
+        imp_delivered = imp * grid_eta
+        imp_renewable = imp_delivered * grid_ren_share
+        denom = res + gen + imp_delivered
+        ren_pen = ((res + imp_renewable) / denom) if denom > 0 else 0.0
         ll_frac = (ll / demand) if demand > 0 else 0.0
         fuel_y = 0.0
         if isinstance(fuel, xr.DataArray):
@@ -288,6 +296,7 @@ def build_yearly_kpis_table_multi_year(
                 "lost_load_kwh": ll,
                 "lost_load_fraction": ll_frac,
                 "total_res_kwh": res,
+                "grid_renewable_kwh": imp_renewable,
                 "renewable_penetration": ren_pen,
                 "fuel_consumption": fuel_y,
                 "emissions_kgco2e": em,
