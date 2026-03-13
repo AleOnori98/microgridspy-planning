@@ -168,6 +168,7 @@ def initialize_constraints(
     if on_grid:
         grid_line_cap = _require_da("grid_line_capacity_kw", p.grid_line_capacity_kw)
         grid_eta = _require_da("grid_transmission_efficiency", p.grid_transmission_efficiency)
+        grid_ren_share = _require_da("grid_renewable_share", p.grid_renewable_share)
         grid_availability = _require_da("grid_availability", p.grid_availability)
 
     res_units = vars["res_units"]  # (inv_step, resource)
@@ -216,10 +217,12 @@ def initialize_constraints(
     )
     model.add_constraints(gen_gen <= gen_cap_available, name="generator_generation_cap")
 
-    finite_gen_max = np.isfinite(gen_max_kw)
-    gen_max_finite = gen_max_kw.where(finite_gen_max, drop=True)
-    if gen_max_finite.size > 0:
-        model.add_constraints((gen_units * gen_nom_kw).sum("inv_step") <= gen_max_finite.max(), name="generator_max_capacity")
+    gen_max_vals = np.asarray(gen_max_kw.values, dtype=float)
+    if np.isfinite(gen_max_vals).any():
+        model.add_constraints(
+            (gen_units * gen_nom_kw).sum("inv_step") <= float(np.nanmax(gen_max_vals)),
+            name="generator_max_capacity",
+        )
 
     # ------------------------------------------------------------------
     # 3) Fuel-to-power relation
@@ -308,9 +311,11 @@ def initialize_constraints(
 
     if on_grid and grid_imp is not None:
         e_grid = (grid_imp * grid_eta).sum("period")
+        e_grid_ren = (grid_imp * grid_eta * grid_ren_share).sum("period")
     else:
         # e_res is a linopy expression, not an xarray object; keep zero as scalar.
         e_grid = 0.0
+        e_grid_ren = 0.0
 
     if enforcement == "scenario_wise":
         model.add_constraints(e_ll <= (max_ll_frac * e_demand), name="max_lost_load_share")
@@ -324,10 +329,11 @@ def initialize_constraints(
 
     if _is_effectively_positive(min_res_pen):
         e_total = e_res + e_gen + e_grid
+        e_renew = e_res + e_grid_ren
         if enforcement == "scenario_wise":
-            model.add_constraints(e_res >= (min_res_pen * e_total), name="min_renewable_penetration")
+            model.add_constraints(e_renew >= (min_res_pen * e_total), name="min_renewable_penetration")
         else:
-            lhs_res = (e_res * scenario_weight).sum("scenario")
+            lhs_res = (e_renew * scenario_weight).sum("scenario")
             if "scenario" in min_res_pen.dims:
                 rhs_res = (min_res_pen * e_total * scenario_weight).sum("scenario")
             else:
