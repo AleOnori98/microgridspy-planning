@@ -27,13 +27,13 @@ Scenarios: scenario_1
 
 Years: typical_year
 
-Resources: Solar
+Resources: Resource_1
 
 ## renewables.yaml
 - Renewable techno-economic parameters.
 - Parameters can vary by resources, scenario and (if enabled) by investment step.
 
-Renewables Technologies: Solar PV
+Renewables Technologies: Technology_1
 
 
 ## battery.yaml

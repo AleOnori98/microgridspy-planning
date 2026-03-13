@@ -13,9 +13,8 @@ meta:
     battery_max_charge_time_hours: hours
     battery_max_installable_capacity_kwh: kWh
     battery_fixed_om_share_per_year: share_per_year
-    battery_capacity_degradation_rate_per_year: per_year
   context:
-    formulation: dynamic
+    formulation: steady_state
     multi_scenario: false
     scenarios:
     - scenario_1
@@ -46,15 +45,13 @@ meta:
         capacity.
       battery_fixed_om_share_per_year: Fixed annual O&M cost expressed as a share
         of battery CAPEX.
-      battery_capacity_degradation_rate_per_year: Annual reduction in effective battery
-        capacity in the dynamic formulation.
 battery:
   label: Battery
   investment:
     by_step:
       base:
         nominal_capacity_kwh: 1.0
-        specific_investment_cost_per_kwh: 400
+        specific_investment_cost_per_kwh: 350
         wacc: 0.05
         calendar_lifetime_years: 10
         embedded_emissions_kgco2e_per_kwh: 0.0
@@ -70,4 +67,3 @@ battery:
     by_scenario:
       scenario_1:
         fixed_om_share_per_year: 0.02
-        capacity_degradation_rate_per_year: 0.0

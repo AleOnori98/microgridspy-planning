@@ -1,8 +1,8 @@
 {
-  "project_name": "test_3",
+  "project_name": "typical_year_base",
   "description": "",
   "module": "generation_planning",
-  "created_at": "2026-02-23T16:54:18.651338Z",
+  "created_at": "2026-03-13T15:18:10.470898Z",
   "core_formulation": "steady_state",
   "system_type": "off_grid",
   "on_grid": false,
@@ -34,13 +34,13 @@
   "system_configuration": {
     "n_sources": 1,
     "conversion_technologies": [
-      "Solar PV"
+      "Technology_1"
     ],
     "resources": [
-      "Solar"
+      "Resource_1"
     ],
     "battery": "Battery",
     "generator": "Generator",
-    "fuel": "Diesel"
+    "fuel": "Fuel"
   }
 }

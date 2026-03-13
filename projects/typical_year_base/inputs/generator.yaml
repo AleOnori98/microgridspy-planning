@@ -10,21 +10,16 @@ meta:
     generator_fixed_om_share_per_year: share_per_year
     fuel_lhv_kwh_per_unit_fuel: kWh_per_unit_fuel
     fuel_direct_emissions_kgco2e_per_unit_fuel: kgCO2e_per_unit_fuel
-    generator_capacity_degradation_rate_per_year: per_year
-    fuel_cost_by_year: currency_per_unit_fuel_by_year
+    fuel_fuel_cost_per_unit_fuel: currency_per_unit_fuel
   context:
-    formulation: dynamic
+    formulation: steady_state
     multi_scenario: false
     scenarios:
     - scenario_1
     capacity_expansion: false
     investment_steps: null
     year_labels_for_fuel_cost:
-    - '2026'
-    - '2027'
-    - '2028'
-    - '2029'
-    - '2030'
+    - typical_year
     efficiency_curve_path_base: inputs/
   description:
     summary: Generator inputs define cohort-dependent investment data, shared technical
@@ -45,10 +40,7 @@ meta:
       fuel_lhv_kwh_per_unit_fuel: Lower heating value of the fuel.
       fuel_direct_emissions_kgco2e_per_unit_fuel: Direct combustion emissions per
         unit of fuel.
-      generator_capacity_degradation_rate_per_year: Annual reduction in effective
-        generator capacity in the dynamic formulation.
-      fuel_cost_by_year: Fuel price trajectory aligned with the dynamic model year
-        labels.
+      fuel_fuel_cost_per_unit_fuel: Fuel price in the steady-state formulation.
 generator:
   label: Generator
   investment:
@@ -56,8 +48,8 @@ generator:
       base:
         nominal_capacity_kw: 1.0
         lifetime_years: 10
-        specific_investment_cost_per_kw: 350
-        wacc: 0.05
+        specific_investment_cost_per_kw: 450
+        wacc: 0.07
         embedded_emissions_kgco2e_per_kw: 0.0
   technical:
     nominal_efficiency_full_load: 0.3
@@ -65,20 +57,14 @@ generator:
   operation:
     by_scenario:
       scenario_1:
-        fixed_om_share_per_year: 0.02
+        fixed_om_share_per_year: 0.05
         efficiency_curve_csv: null
-        capacity_degradation_rate_per_year: 0.0
 fuel:
-  label: Diesel
+  label: Fuel
   by_scenario:
     scenario_1:
       lhv_kwh_per_unit_fuel: 10
       direct_emissions_kgco2e_per_unit_fuel: 0.0
-      by_year_cost_per_unit_fuel:
-      - 1.2
-      - 1.2
-      - 1.2
-      - 1.2
-      - 1.2
-      description: Multi-year fuel inputs use one fuel cost value per model year label;
-        repeat values for flat trajectories.
+      fuel_cost_per_unit_fuel: 1.2
+      description: Typical-year fuel inputs use a single constant fuel cost per unit
+        fuel.
