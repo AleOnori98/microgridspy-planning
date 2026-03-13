@@ -1016,6 +1016,8 @@ def _load_grid_yaml(
     PARAMS = [
         ("line", "capacity_kw", "grid_line_capacity_kw"),
         ("line", "transmission_efficiency", "grid_transmission_efficiency"),
+        ("line", "renewable_share", "grid_renewable_share"),
+        ("line", "emissions_factor_kgco2e_per_kwh", "grid_emissions_factor_kgco2e_per_kwh"),
 
         ("outages", "average_outages_per_year", "grid_avg_outages_per_year"),
         ("outages", "average_outage_duration_minutes", "grid_avg_outage_duration_minutes"),
@@ -1023,7 +1025,9 @@ def _load_grid_yaml(
         # outage duration Weibull parameters (hours / -)
         ("outages", "outage_scale_od_hours", "grid_outage_scale_od_hours"),
         ("outages", "outage_shape_od", "grid_outage_shape_od"),
+        ("outages", "outage_seed", "grid_outage_seed"),
     ]
+    OPTIONAL_KEYS = {"renewable_share", "emissions_factor_kgco2e_per_kwh", "outage_seed"}
 
     arr = {out: np.full((len(scenario_labels),), np.nan, dtype=float) for _, _, out in PARAMS}
 
@@ -1044,7 +1048,7 @@ def _load_grid_yaml(
                 raise InputValidationError(
                     f"{path.name}: grid.by_scenario['{s_lab}'] missing/invalid '{section}' mapping."
                 )
-            if key not in sec:
+            if key not in sec and key not in OPTIONAL_KEYS:
                 raise InputValidationError(
                     f"{path.name}: grid.by_scenario['{s_lab}'].{section} missing key '{key}'."
                 )
@@ -1053,16 +1057,26 @@ def _load_grid_yaml(
             default = 0.0
             if out == "grid_transmission_efficiency":
                 default = 1.0
+            elif out == "grid_renewable_share":
+                default = 0.0
+            elif out == "grid_emissions_factor_kgco2e_per_kwh":
+                default = 0.0
             elif out == "grid_outage_scale_od_hours":
                 default = 36 / 60  # 0.6h default
             elif out == "grid_outage_shape_od":
                 default = 0.56
+            elif out == "grid_outage_seed":
+                default = 0.0
 
             arr[out][i] = _as_float(sec.get(key), name=f"grid/{s_lab}/{section}/{key}", default=default)
 
     # Optional: basic validity checks
     if np.any(arr["grid_transmission_efficiency"] < 0.0) or np.any(arr["grid_transmission_efficiency"] > 1.0):
         raise InputValidationError(f"{path.name}: line.transmission_efficiency must be in [0,1].")
+    if np.any(arr["grid_renewable_share"] < 0.0) or np.any(arr["grid_renewable_share"] > 1.0):
+        raise InputValidationError(f"{path.name}: line.renewable_share must be in [0,1].")
+    if np.any(arr["grid_emissions_factor_kgco2e_per_kwh"] < 0.0):
+        raise InputValidationError(f"{path.name}: line.emissions_factor_kgco2e_per_kwh must be >= 0.")
     if np.any(arr["grid_outage_scale_od_hours"] <= 0.0):
         raise InputValidationError(f"{path.name}: outages.outage_scale_od_hours must be > 0.")
     if np.any(arr["grid_outage_shape_od"] <= 0.0):

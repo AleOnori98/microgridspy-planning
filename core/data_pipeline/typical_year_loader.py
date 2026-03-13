@@ -65,36 +65,8 @@ def _assemble_grid_block(
             exp_path = None
             grid_export_price = None
 
-        avail_mat = np.zeros((int(period_coord.size), int(scenario_coord.size)), dtype=float)
-        for j, s_lab in enumerate([str(s) for s in scenario_coord.values.tolist()]):
-            ao = float(grid_ds["grid_avg_outages_per_year"].sel(scenario=s_lab).values)
-            ad = float(grid_ds["grid_avg_outage_duration_minutes"].sel(scenario=s_lab).values)
-
-            scale_od = float(grid_ds["grid_outage_scale_od_hours"].sel(scenario=s_lab).values)
-            shape_od = float(grid_ds["grid_outage_shape_od"].sel(scenario=s_lab).values)
-
-            v = simulate_grid_availability_typical_year(
-                ao,
-                ad,
-                periods_per_year=int(period_coord.size),
-                scale_od=scale_od,
-                shape_od=shape_od,
-                rng=None,
-            )
-            avail_mat[:, j] = v
-
-        grid_availability = xr.DataArray(
-            avail_mat,
-            coords={"period": period_coord, "scenario": scenario_coord},
-            dims=("period", "scenario"),
-            name="grid_availability",
-            attrs={"units": "binary", "component": "grid"},
-        )
-
+        grid_availability = regenerate_grid_availability_typical_year(project_name=project_name, sets=sets)
         grid_avail_csv_path = paths.inputs_dir / "grid_availability.csv"
-        p._write_grid_availability_csv(
-            grid_avail_csv_path, availability=grid_availability, year_label="typical_year"
-        )
 
         to_merge = [
             grid_ds,
@@ -122,6 +94,50 @@ def _assemble_grid_block(
         data.attrs["settings"]["grid"] = {"on_grid": False, "allow_export": False}
 
     return data
+
+
+def regenerate_grid_availability_typical_year(
+    *,
+    project_name: str,
+    sets: xr.Dataset,
+) -> xr.DataArray:
+    scenario_coord = sets.coords["scenario"]
+    period_coord = sets.coords["period"]
+    paths = project_paths(project_name)
+    grid_yaml_path = paths.inputs_dir / "grid.yaml"
+    grid_ds = p._load_grid_yaml(grid_yaml_path, scenario_coord=scenario_coord)
+
+    avail_mat = np.zeros((int(period_coord.size), int(scenario_coord.size)), dtype=float)
+    for j, s_lab in enumerate([str(s) for s in scenario_coord.values.tolist()]):
+        ao = float(grid_ds["grid_avg_outages_per_year"].sel(scenario=s_lab).values)
+        ad = float(grid_ds["grid_avg_outage_duration_minutes"].sel(scenario=s_lab).values)
+        scale_od = float(grid_ds["grid_outage_scale_od_hours"].sel(scenario=s_lab).values)
+        shape_od = float(grid_ds["grid_outage_shape_od"].sel(scenario=s_lab).values)
+        seed = int(float(grid_ds["grid_outage_seed"].sel(scenario=s_lab).values))
+
+        v = simulate_grid_availability_typical_year(
+            ao,
+            ad,
+            periods_per_year=int(period_coord.size),
+            scale_od=scale_od,
+            shape_od=shape_od,
+            rng=np.random.default_rng(seed),
+        )
+        avail_mat[:, j] = v
+
+    grid_availability = xr.DataArray(
+        avail_mat,
+        coords={"period": period_coord, "scenario": scenario_coord},
+        dims=("period", "scenario"),
+        name="grid_availability",
+        attrs={"units": "binary", "component": "grid"},
+    )
+
+    grid_avail_csv_path = paths.inputs_dir / "grid_availability.csv"
+    p._write_grid_availability_csv(
+        grid_avail_csv_path, availability=grid_availability, year_label="typical_year"
+    )
+    return grid_availability
 
 
 def load_typical_year_dataset(project_name: str, sets: xr.Dataset) -> xr.Dataset:
@@ -237,7 +253,7 @@ def load_typical_year_dataset(project_name: str, sets: xr.Dataset) -> xr.Dataset
         "unit_commitment": uc_enabled,
         "multi_scenario": {"enabled": ms_enabled, "n_scenarios": n_scen},
         "resources": {
-            "n_resources": int(sets.dims.get("resource", 0)),
+            "n_resources": int(sets.sizes.get("resource", 0)),
             "resource_labels": sets.coords.get("resource", []).values.tolist(),
         },
         "optimization_constraints": {"enforcement": enforcement},
