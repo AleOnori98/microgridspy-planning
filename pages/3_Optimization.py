@@ -50,7 +50,6 @@ KEYS = {
     "custom_lp": "gp_custom_lp",
     "use_custom_log": "gp_use_custom_log",
     "custom_log": "gp_custom_log",
-    "opt_step": "gp_opt_step",  # "sets" | "data" | "build" | "solve"
 
     # solver params
     "highs_time_limit": "gp_highs_time_limit",
@@ -82,7 +81,6 @@ def _init_defaults() -> None:
         KEYS["custom_lp"]: "",
         KEYS["use_custom_log"]: False,
         KEYS["custom_log"]: "",
-        KEYS["opt_step"]: "solve",
 
         # HiGHS
         KEYS["highs_time_limit"]: 0,
@@ -134,9 +132,14 @@ def _solver_params(solver: str) -> Dict[str, Any]:
     return p
 
 
-def _validate_optional_paths() -> Tuple[Optional[Path], Optional[Path], bool]:
+def _default_log_path(project_name: str, solver: str) -> Path:
+    paths = project_paths(project_name)
+    return paths.logs_dir / f"{solver}_solve.log"
+
+
+def _validate_optional_paths(project_name: str, solver: str) -> Tuple[Optional[Path], Path, bool]:
     lp_path = None
-    log_path = None
+    log_path = _default_log_path(project_name, solver)
     ok = True
 
     if bool(st.session_state[KEYS["use_custom_lp"]]):
@@ -249,7 +252,7 @@ def _show_xr_dataset_debug(ds: xr.Dataset, title: str, coord_preview_n: int = 8)
                         "dtype": str(da.dtype),
                     }
                 )
-            st.dataframe(pd.DataFrame(rows), use_container_width=True)
+            st.dataframe(pd.DataFrame(rows), width="stretch")
 
 
 def _render_variables_debug(data_ds: Optional[xr.Dataset], vars_dict: Any) -> None:
@@ -314,7 +317,7 @@ def _render_variables_debug(data_ds: Optional[xr.Dataset], vars_dict: Any) -> No
                     }
                 )
 
-        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+        st.dataframe(pd.DataFrame(rows), width="stretch")
 
 
 def _render_constraints_debug(model_obj: Any) -> None:
@@ -393,7 +396,7 @@ def _render_constraints_debug(model_obj: Any) -> None:
             rows.append({"constraint": str(cname), "count": "", "dims": "ERROR", "coords_preview": str(e)})
 
     with st.expander("Constraints overview (name / count / dims)", expanded=False):
-        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+        st.dataframe(pd.DataFrame(rows), width="stretch")
 
     with st.expander("Inspect a constraint (raw)", expanded=False):
         names = [r["constraint"] for r in rows]
@@ -512,7 +515,7 @@ def _render_minimal_results(solution_summary: Optional[Dict[str, Any]]) -> None:
     st.subheader("Results (minimal)")
 
     if not solution_summary:
-        st.info("No results yet. Run the 'solve' step.")
+        st.info("No results yet. Build and solve the model first.")
         return
 
     obj = solution_summary.get("objective_value", None)
@@ -550,7 +553,7 @@ def render_generation_planning_optimization_page() -> None:
     _init_defaults()
 
     st.title("Model Optimization")
-    st.caption("Run optimization steps for the active project.")
+    st.caption("Build and solve the single-objective optimization model for the active project.")
 
     project_name = st.session_state.get(KEYS["active_project"])
     if not project_name:
@@ -564,22 +567,9 @@ def render_generation_planning_optimization_page() -> None:
     formulation_json = _read_json(paths.formulation_json)
     formulation_mode = _as_str(formulation_json.get("core_formulation", "steady_state"), name="core_formulation")
 
-    st.subheader("Backend step to run")
-    st.caption("Use these steps to test the backend progressively while you implement preprocessing and model algebra.")
-
-    opt_step = st.radio(
-        "Select step",
-        options=["sets", "data", "build", "solve"],
-        index=["sets", "data", "build", "solve"].index(st.session_state[KEYS["opt_step"]]),
-        format_func=lambda v: {
-            "sets": "1) Initialize sets only",
-            "data": "2) Initialize sets + data",
-            "build": "3) Build full model (vars/constraints/objective)",
-            "solve": "4) Build and solve (single objective)",
-        }[v],
-        horizontal=True,
-    )
-    st.session_state[KEYS["opt_step"]] = opt_step
+    st.subheader("Solve Run")
+    st.caption("This page builds the full model and solves the single-objective formulation.")
+    st.info("Multi-objective workflows are not exposed here yet. This page always runs the single-objective solve.")
 
     st.subheader("Solver")
     solver = st.radio(
@@ -592,7 +582,7 @@ def render_generation_planning_optimization_page() -> None:
     st.session_state[KEYS["solver"]] = solver
 
     with st.expander("Advanced settings", expanded=False):
-        st.caption("Optional output paths and solver-specific parameters.")
+        st.caption("Optional problem export, log override, and solver-specific parameters.")
 
         c1, c2 = st.columns(2)
         with c1:
@@ -609,7 +599,7 @@ def render_generation_planning_optimization_page() -> None:
 
         with c2:
             st.session_state[KEYS["use_custom_log"]] = st.checkbox(
-                "Write solver log file",
+                "Override solver log path",
                 value=bool(st.session_state[KEYS["use_custom_log"]]),
             )
             st.session_state[KEYS["custom_log"]] = st.text_input(
@@ -665,13 +655,15 @@ def render_generation_planning_optimization_page() -> None:
 
     st.markdown("---")
 
-    lp_path, log_path, ok = _validate_optional_paths()
+    lp_path, log_path, ok = _validate_optional_paths(project_name, solver)
     params = _solver_params(solver)
 
+    st.caption(f"Solver log will be stored at `{log_path}`")
+
     run_clicked = st.button(
-        "Run",
+        "Build and solve",
         type="primary",
-        help="Runs the selected backend step on the active project.",
+        help="Builds the full model and solves the single-objective problem for the active project.",
     )
 
     if run_clicked and ok:
@@ -681,79 +673,38 @@ def render_generation_planning_optimization_page() -> None:
 
         t0 = time.time()
 
-        with st.spinner(f"Running step '{opt_step}' for project '{project_name}'..."):
+        with st.spinner(f"Building and solving project '{project_name}'..."):
                 
                 # Initialize model wrapper (which will lazily build the linopy model as needed based on the step)
                 if formulation_mode == "steady_state": m = SteadyStateModel(project_name=project_name)
                 elif formulation_mode == "dynamic": m = MultiYearModel(project_name=project_name)
                 else: raise InputValidationError(f"Unknown formulation '{formulation_mode}' in formulation.json")
 
-                if opt_step == "sets":
-                    m._initialize_sets()
-                    st.session_state[KEYS["sets"]] = m.sets
-                    st.session_state[KEYS["results_bundle"]] = build_results_bundle(
-                        sets=m.sets, data=None, vars=None, model_obj=None, solution=None, solution_summary=None, solver=solver
-                    )
-
-                elif opt_step == "data":
-                    m._initialize_sets()
-                    m._initialize_data()
-                    st.session_state[KEYS["sets"]] = m.sets
-                    st.session_state[KEYS["data"]] = m.data
-                    st.session_state[KEYS["results_bundle"]] = build_results_bundle(
-                        sets=m.sets, data=m.data, vars=None, model_obj=None, solution=None, solution_summary=None, solver=solver
-                    )
-
-                elif opt_step == "build":
-                    m._initialize_sets()
-                    m._initialize_data()
-                    m._initialize_vars()
-                    m._initialize_constraints()
-                    try:
-                        m._initialize_objective()
-                    except NotImplementedError:
-                        st.warning("Objective not implemented yet. Build completed through constraints only.")
-
-                    st.session_state[KEYS["sets"]] = m.sets
-                    st.session_state[KEYS["data"]] = m.data
-                    st.session_state[KEYS["vars"]] = m.vars
-                    st.session_state[KEYS["model_obj"]] = m  # store whole model, not a bool (needed for debugging)
-                    st.session_state[KEYS["results_bundle"]] = build_results_bundle(
-                        sets=m.sets,
-                        data=m.data,
-                        vars=m.vars,
-                        model_obj=m,
-                        solution=getattr(m.model, "solution", None) if m.model is not None else None,
-                        solution_summary=st.session_state.get(KEYS["solution_summary"]),
-                        solver=solver,
-                    )
-
-                else:
-                    sol = m.solve_single_objective(
-                        solver=solver,
-                        solver_params=params,
-                        problem_fn=lp_path if lp_path else None,
-                        log_file_path=log_path if log_path else None,
-                    )
-                    st.session_state[KEYS["solution"]] = sol
-                    st.session_state[KEYS["sets"]] = m.sets
-                    st.session_state[KEYS["data"]] = m.data
-                    st.session_state[KEYS["vars"]] = m.vars
-                    st.session_state[KEYS["model_obj"]] = m  # keep for debug
-                    st.session_state[KEYS["log_path"]] = str(m._last_log_path) if m._last_log_path else None
-                    st.session_state[KEYS["solution_summary"]] = _extract_solution_summary(m)
-                    st.session_state[KEYS["results_bundle"]] = build_results_bundle(
-                        sets=m.sets,
-                        data=m.data,
-                        vars=m.vars,
-                        model_obj=m,
-                        solution=getattr(m.model, "solution", None) if m.model is not None else sol,
-                        solution_summary=st.session_state[KEYS["solution_summary"]],
-                        solver=solver,
-                    )
+                sol = m.solve_single_objective(
+                    solver=solver,
+                    solver_params=params,
+                    problem_fn=lp_path if lp_path else None,
+                    log_file_path=log_path,
+                )
+                st.session_state[KEYS["solution"]] = sol
+                st.session_state[KEYS["sets"]] = m.sets
+                st.session_state[KEYS["data"]] = m.data
+                st.session_state[KEYS["vars"]] = m.vars
+                st.session_state[KEYS["model_obj"]] = m  # keep for debug
+                st.session_state[KEYS["log_path"]] = str(m._last_log_path) if m._last_log_path else str(log_path)
+                st.session_state[KEYS["solution_summary"]] = _extract_solution_summary(m)
+                st.session_state[KEYS["results_bundle"]] = build_results_bundle(
+                    sets=m.sets,
+                    data=m.data,
+                    vars=m.vars,
+                    model_obj=m,
+                    solution=getattr(m.model, "solution", None) if m.model is not None else sol,
+                    solution_summary=st.session_state[KEYS["solution_summary"]],
+                    solver=solver,
+                )
 
         elapsed = time.time() - t0
-        st.success(f"Step '{opt_step}' completed. Runtime: {elapsed:.2f} s")
+        st.success(f"Solve completed. Runtime: {elapsed:.2f} s")
 
     _render_solver_log(st.session_state.get(KEYS["log_path"]))
 

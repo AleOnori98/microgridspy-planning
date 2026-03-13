@@ -255,6 +255,7 @@ def create_or_overwrite_project(*, project_name: str, project_description: str, 
     st.session_state[K["active_project"]] = project_name
 
     paths = ensure_project_structure(project_name)
+    st.session_state["project_path"] = str(paths.root)
 
     # Always rewrite formulation.json to match current UI config
     write_formulation_file(project_name=project_name, project_description=project_description, cfg=cfg)
@@ -296,6 +297,7 @@ def load_project(*, project_name: str) -> None:
 
     st.session_state[K["active_project"]] = project_name
     paths = project_paths(project_name)
+    st.session_state["project_path"] = str(paths.root)
     st.success(f"Project loaded: {paths.root}")
     st.info("No files were modified. Proceed to fill/validate/run using the existing project inputs.")
 
