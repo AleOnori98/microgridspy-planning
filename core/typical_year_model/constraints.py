@@ -100,6 +100,7 @@ def initialize_constraints(
     if on_grid:
         line_cap_kw = p.grid_line_capacity_kw  # (scenario,)
         grid_eta = p.grid_transmission_efficiency  # (scenario,)
+        grid_ren_share = p.grid_renewable_share if p.grid_renewable_share is not None else 0.0
         grid_avail = p.grid_availability  # (period, scenario)
 
     # ---------------------------------------------------------------------
@@ -344,9 +345,15 @@ def initialize_constraints(
     E_gen_s    = gen_gen.sum("period")     # (scenario,)
 
     if on_grid:
-        E_grid_s = grid_imp.sum("period")  # (scenario,)
+        E_grid_s = (grid_imp * grid_eta).sum("period")  # (scenario,) delivered imported energy
+        E_grid_ren_s = (grid_imp * grid_eta * grid_ren_share).sum("period")  # (scenario,)
     else:
         E_grid_s = xr.DataArray(
+            np.zeros((int(scenario.size),), dtype=float),
+            coords={"scenario": scenario},
+            dims=("scenario",),
+        )
+        E_grid_ren_s = xr.DataArray(
             np.zeros((int(scenario.size),), dtype=float),
             coords={"scenario": scenario},
             dims=("scenario",),
@@ -364,16 +371,17 @@ def initialize_constraints(
 
     # --- (B) Minimum renewable penetration
     #   E_total = E_res + E_gen + E_grid_import
-    #   E_renew = E_res
+    #   E_renew = E_res + renewable share of delivered grid imports
     # Only add if min_res_pen > 0.0
     if min_res_pen > 0.0:
         if enforcement == "scenario_wise":
             E_total_s = E_res_s + E_gen_s + E_grid_s
-            model.add_constraints(E_res_s >= min_res_pen * E_total_s, name="min_renewable_penetration")
+            E_renew_s = E_res_s + E_grid_ren_s
+            model.add_constraints(E_renew_s >= min_res_pen * E_total_s, name="min_renewable_penetration")
         else:
             E_total_exp = ((E_res_s + E_gen_s + E_grid_s) * w_s).sum("scenario")  # scalar
-            E_res_exp   = (E_res_s * w_s).sum("scenario")                         # scalar
-            model.add_constraints(E_res_exp >= min_res_pen * E_total_exp, name="min_renewable_penetration_expected")
+            E_renew_exp = ((E_res_s + E_grid_ren_s) * w_s).sum("scenario")        # scalar
+            model.add_constraints(E_renew_exp >= min_res_pen * E_total_exp, name="min_renewable_penetration_expected")
 
     # ---------------------------------------------------------------------
     # 10) Land availability (renewables only)

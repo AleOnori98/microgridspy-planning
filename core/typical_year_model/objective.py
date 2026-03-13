@@ -50,7 +50,8 @@ def initialize_objective(
       - grid export revenue (if allow_export)
       - renewable production subsidy (revenue)
       - lost load penalty (if any)
-      - emissions cost (if emission_cost_per_kgco2e > 0)
+      - emissions cost for scope 1, scope 2 (if on-grid), and scope 3
+        (if emission_cost_per_kgco2e > 0)
     """
     if not isinstance(sets, xr.Dataset):
         raise InputValidationError("initialize_objective: sets must be an xarray.Dataset.")
@@ -132,6 +133,12 @@ def initialize_objective(
     # Grid prices (if on-grid)
     if on_grid:
         grid_import_price = p.grid_import_price                    # (period, scenario)
+        grid_eta = p.grid_transmission_efficiency if p.grid_transmission_efficiency is not None else 1.0
+        grid_em_factor = (
+            p.grid_emissions_factor_kgco2e_per_kwh
+            if p.grid_emissions_factor_kgco2e_per_kwh is not None
+            else 0.0
+        )
         if allow_export:
             grid_export_price = p.grid_export_price                # (period, scenario)
 
@@ -209,6 +216,15 @@ def initialize_objective(
     # ------------------------------------------------------------------
     # Direct operational emissions from fuel
     direct_ops_kg_s = fuel_cons.sum("period") * fuel_dir_kg_per_unit  # (scenario,)
+    scope2_grid_kg_s = (
+        (grid_imp * grid_eta).sum("period") * grid_em_factor
+        if on_grid and grid_imp is not None
+        else xr.DataArray(
+            np.zeros((int(scenario.size),), dtype=float),
+            coords={"scenario": scenario},
+            dims=("scenario",),
+        )
+    )
 
     # Embodied emissions (annualized by lifetime)
     # Renewables: (cap_res_kw[resource] * emb_kg_per_kw[scenario,resource] / life_y[resource]) -> (scenario,)
@@ -216,7 +232,7 @@ def initialize_objective(
     embodied_kg_gen_s = (cap_gen_kw * gen_emb_kg_per_kw) / gen_life_y                      # (scenario,)
     embodied_kg_bat_s = (cap_bat_kwh * bat_emb_kg_per_kwh) / bat_life_y                    # (scenario,)
     embodied_kg_s = embodied_kg_res_s + embodied_kg_gen_s + embodied_kg_bat_s              # (scenario,)
-    emissions_cost_s = emission_cost * (direct_ops_kg_s + embodied_kg_s)                   # (scenario,)
+    emissions_cost_s = emission_cost * (direct_ops_kg_s + scope2_grid_kg_s + embodied_kg_s)  # (scenario,)
 
     # Total externalities cost
     externalities_cost_s = ll_cost_s + emissions_cost_s  # (scenario,)

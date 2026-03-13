@@ -67,6 +67,8 @@ class Params:
     # Grid
     grid_line_capacity_kw: Optional[xr.DataArray]
     grid_transmission_efficiency: Optional[xr.DataArray]
+    grid_renewable_share: Optional[xr.DataArray]
+    grid_emissions_factor_kgco2e_per_kwh: Optional[xr.DataArray]
 
     # Optional curve vars
     generator_eff_curve_rel_power: Optional[xr.DataArray]
@@ -140,6 +142,8 @@ def get_params(ds: xr.Dataset) -> Params:
         fuel_direct_emissions_kgco2e_per_unit_fuel=ds["fuel_direct_emissions_kgco2e_per_unit_fuel"],
         grid_line_capacity_kw=_opt("grid_line_capacity_kw"),
         grid_transmission_efficiency=_opt("grid_transmission_efficiency"),
+        grid_renewable_share=_opt("grid_renewable_share"),
+        grid_emissions_factor_kgco2e_per_kwh=_opt("grid_emissions_factor_kgco2e_per_kwh"),
         generator_eff_curve_rel_power=_opt("generator_eff_curve_rel_power"),
         generator_eff_curve_eff=_opt("generator_eff_curve_eff"),
     )
