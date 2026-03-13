@@ -1,11 +1,43 @@
 from __future__ import annotations
 
+import contextlib
 import re
+import sys
 from pathlib import Path
 import numpy as np
 import pandas as pd
 
 from core.io.paths import ProjectPaths
+
+
+class _TeeTextStream:
+    def __init__(self, *streams) -> None:
+        self._streams = streams
+
+    def write(self, data: str) -> int:
+        for stream in self._streams:
+            try:
+                stream.write(data)
+            except Exception:
+                pass
+        return len(data)
+
+    def flush(self) -> None:
+        for stream in self._streams:
+            try:
+                stream.flush()
+            except Exception:
+                pass
+
+
+@contextlib.contextmanager
+def tee_console_output(log_path: Path):
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("w", encoding="utf-8", errors="replace") as handle:
+        stdout_tee = _TeeTextStream(sys.stdout, handle)
+        stderr_tee = _TeeTextStream(sys.stderr, handle)
+        with contextlib.redirect_stdout(stdout_tee), contextlib.redirect_stderr(stderr_tee):
+            yield
 
 
 def sanitize_project_name(name: str) -> str:
