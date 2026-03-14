@@ -21,6 +21,7 @@ from core.export.multi_year_results import (
     build_design_by_step_table_multi_year,
     build_yearly_kpis_table_multi_year,
 )
+from core.visualization.multi_year_results_page import render_multi_year_results
 
 
 # Keep aligned with your Optimization page
@@ -411,7 +412,7 @@ def render_generation_planning_results_page() -> None:
     settings = _get_settings(data)
     formulation = str(settings.get("formulation", "steady_state"))
     if formulation == "dynamic":
-        _render_multi_year_results(bundle, project_name)
+        render_multi_year_results(bundle, project_name)
         return
 
     on_grid = _get_flag(settings, ("grid", "on_grid"), default=False)

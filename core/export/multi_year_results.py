@@ -9,6 +9,12 @@ import xarray as xr
 import linopy as lp
 
 from core.io.utils import project_paths
+from core.multi_year_model.lifecycle import (
+    discounted_annuity_tail_memo,
+    replacement_active_mask,
+    replacement_commission_mask,
+    year_ordinal,
+)
 from core.multi_year_model.params import get_params
 
 
@@ -64,6 +70,33 @@ def _scenario_weights(p: Any, scenario_coord: xr.DataArray) -> xr.DataArray:
     )
 
 
+def _sel_year_scenario_or_self(x: Any, *, year: Any, scenario: Any) -> Any:
+    if not isinstance(x, xr.DataArray):
+        return x
+    indexers = {}
+    if "year" in x.dims:
+        indexers["year"] = year
+    if "scenario" in x.dims:
+        indexers["scenario"] = scenario
+    return x.sel(**indexers) if indexers else x
+
+
+def _scalarize_da(x: Any, **indexers: Any) -> float:
+    if not isinstance(x, xr.DataArray):
+        return float(x)
+    da = x
+    valid_indexers = {k: v for k, v in indexers.items() if k in da.dims}
+    if valid_indexers:
+        da = da.sel(**valid_indexers)
+    extra_dims = [d for d in da.dims if da.sizes.get(d, 1) > 1]
+    if extra_dims:
+        da = da.isel({d: 0 for d in extra_dims})
+    vals = np.asarray(da.values, dtype=float).reshape(-1)
+    if vals.size == 0:
+        return float("nan")
+    return float(vals[0])
+
+
 def _crf(r: xr.DataArray | float, n: xr.DataArray | float) -> xr.DataArray:
     rr = xr.DataArray(r)
     nn = xr.DataArray(n)
@@ -71,55 +104,6 @@ def _crf(r: xr.DataArray | float, n: xr.DataArray | float) -> xr.DataArray:
     out = (rr * a) / (a - 1.0)
     out = xr.where(np.abs(rr) < 1e-12, 1.0 / nn, out)
     return xr.where(nn > 0, out, 0.0)
-
-
-def _year_ordinal(sets: xr.Dataset) -> xr.DataArray:
-    year = sets.coords["year"]
-    return xr.DataArray(
-        np.arange(1, int(year.size) + 1, dtype=float),
-        dims=("year",),
-        coords={"year": year},
-    )
-
-
-def _inv_start_ord(sets: xr.Dataset) -> xr.DataArray:
-    year_vals = [str(v) for v in sets.coords["year"].values.tolist()]
-    start_vals = [str(v) for v in sets["inv_step_start_year"].values.tolist()]
-    idx = {y: i + 1 for i, y in enumerate(year_vals)}
-    return xr.DataArray(
-        [float(idx[v]) for v in start_vals],
-        dims=("inv_step",),
-        coords={"inv_step": sets.coords["inv_step"]},
-    )
-
-
-def _svc_years(sets: xr.Dataset) -> xr.DataArray:
-    return (_year_ordinal(sets) - _inv_start_ord(sets) + 1.0).transpose("inv_step", "year")
-
-
-def _active_mask(sets: xr.Dataset, lt: xr.DataArray | float) -> xr.DataArray:
-    svc = _svc_years(sets)
-    return ((svc >= 1.0) & (svc <= xr.DataArray(lt))).astype(float)
-
-
-def _commission_mask(sets: xr.Dataset) -> xr.DataArray:
-    svc = _svc_years(sets)
-    return (svc == 1.0).astype(float)
-
-
-def _salvage_factor(sets: xr.Dataset, rate: xr.DataArray | float, lt: xr.DataArray | float) -> xr.DataArray:
-    r = xr.DataArray(rate)
-    n = xr.DataArray(lt)
-    H = float(int(sets.coords["year"].size))
-    used = (H - _inv_start_ord(sets) + 1.0).clip(min=0.0)
-    rem = n - used
-    a_n = (1.0 + r) ** n
-    a_used = (1.0 + r) ** used
-    frac = (a_n - a_used) / (a_n - 1.0)
-    frac0 = xr.where(n > 0.0, rem / n, 0.0)
-    frac = xr.where(np.abs(r) < 1e-12, frac0, frac)
-    frac = xr.where(rem > 0.0, frac, 0.0)
-    return xr.where(used > 0.0, frac, 0.0)
 
 
 def build_dispatch_timeseries_table_multi_year(
@@ -219,7 +203,7 @@ def build_design_by_step_table_multi_year(
                     "technology": "renewable",
                     "resource": str(r),
                     "units": u,
-                    "installed_capacity": u * float(res_nom.sel(resource=r)),
+                    "installed_capacity": u * _scalarize_da(res_nom, inv_step=s, resource=r),
                     "capacity_unit": "kW",
                 }
             )
@@ -231,7 +215,7 @@ def build_design_by_step_table_multi_year(
                 "technology": "battery",
                 "resource": "",
                 "units": bu,
-                "installed_capacity": bu * float(bat_nom),
+                "installed_capacity": bu * _scalarize_da(bat_nom, inv_step=s),
                 "capacity_unit": "kWh",
             }
         )
@@ -243,7 +227,7 @@ def build_design_by_step_table_multi_year(
                 "technology": "generator",
                 "resource": "",
                 "units": gu,
-                "installed_capacity": gu * float(gen_nom),
+                "installed_capacity": gu * _scalarize_da(gen_nom, inv_step=s),
                 "capacity_unit": "kW",
             }
         )
@@ -286,7 +270,13 @@ def build_yearly_kpis_table_multi_year(
             fuel_y = float(fuel.sel(year=year, scenario=scenario).sum("period"))
         em = 0.0
         if p.fuel_direct_emissions_kgco2e_per_unit_fuel is not None:
-            em = fuel_y * float(p.fuel_direct_emissions_kgco2e_per_unit_fuel.sel(year=year, scenario=scenario))
+            em = fuel_y * float(
+                _sel_year_scenario_or_self(
+                    p.fuel_direct_emissions_kgco2e_per_unit_fuel,
+                    year=year,
+                    scenario=scenario,
+                )
+            )
         rows.append(
             {
                 "year": year,
@@ -330,7 +320,7 @@ def build_discounted_cashflows_table_multi_year(
     p = get_params(data)
     w = _scenario_weights(p, sets.coords["scenario"])
     rs = float((p.settings.get("social_discount_rate", 0.0) or 0.0))
-    disc = 1.0 / ((1.0 + rs) ** _year_ordinal(sets))
+    disc = 1.0 / ((1.0 + rs) ** year_ordinal(sets))
 
     res_units = _require_da("res_units", _get_var_solution(vars=vars, solution=solution, name="res_units"))
     bat_units = _require_da("battery_units", _get_var_solution(vars=vars, solution=solution, name="battery_units"))
@@ -361,9 +351,9 @@ def build_discounted_cashflows_table_multi_year(
     ann_res = res_inv * _crf(res_wacc, res_life)
     ann_bat = bat_inv * _crf(bat_wacc, bat_life)
     ann_gen = gen_inv * _crf(gen_wacc, gen_life)
-    act_res = _active_mask(sets, res_life)
-    act_bat = _active_mask(sets, bat_life)
-    act_gen = _active_mask(sets, gen_life)
+    act_res = replacement_active_mask(sets)
+    act_bat = replacement_active_mask(sets)
+    act_gen = replacement_active_mask(sets)
     ann_res_y = (ann_res * act_res).sum("inv_step").sum("resource")
     ann_bat_y = (ann_bat * act_bat).sum("inv_step")
     ann_gen_y = (ann_gen * act_gen).sum("inv_step")
@@ -387,36 +377,36 @@ def build_discounted_cashflows_table_multi_year(
     if p.fuel_direct_emissions_kgco2e_per_unit_fuel is not None and p.emission_cost_per_kgco2e is not None:
         ext_y_s = ext_y_s + fuel_cons.sum("period") * p.fuel_direct_emissions_kgco2e_per_unit_fuel * p.emission_cost_per_kgco2e
 
-    commission = _commission_mask(sets)
+    commission_res = replacement_commission_mask(sets, res_life)
+    commission_bat = replacement_commission_mask(sets, bat_life)
+    commission_gen = replacement_commission_mask(sets, gen_life)
     emb_y = xr.DataArray(0.0).broadcast_like(ann_res_y)
     em_cost_exp = 0.0
     if p.emission_cost_per_kgco2e is not None:
         em_cost_exp = (p.emission_cost_per_kgco2e * w).sum("scenario") if "scenario" in p.emission_cost_per_kgco2e.dims else p.emission_cost_per_kgco2e
     if p.res_embedded_emissions_kgco2e_per_kw is not None:
-        emb_y = emb_y + (res_units * res_nom * p.res_embedded_emissions_kgco2e_per_kw * commission).sum("inv_step").sum("resource") * em_cost_exp
+        emb_y = emb_y + (res_units * res_nom * p.res_embedded_emissions_kgco2e_per_kw * commission_res).sum("inv_step").sum("resource") * em_cost_exp
     if p.battery_embedded_emissions_kgco2e_per_kwh is not None:
-        emb_y = emb_y + (bat_units * bat_nom * p.battery_embedded_emissions_kgco2e_per_kwh * commission).sum("inv_step") * em_cost_exp
+        emb_y = emb_y + (bat_units * bat_nom * p.battery_embedded_emissions_kgco2e_per_kwh * commission_bat).sum("inv_step") * em_cost_exp
     if p.generator_embedded_emissions_kgco2e_per_kw is not None:
-        emb_y = emb_y + (gen_units * gen_nom * p.generator_embedded_emissions_kgco2e_per_kw * commission).sum("inv_step") * em_cost_exp
+        emb_y = emb_y + (gen_units * gen_nom * p.generator_embedded_emissions_kgco2e_per_kw * commission_gen).sum("inv_step") * em_cost_exp
 
     opex_exp_y = (opex_y_s * w).sum("scenario")
     ext_exp_y = (ext_y_s * w).sum("scenario")
     gross_y = ann_res_y + ann_bat_y + ann_gen_y + opex_exp_y + ext_exp_y + emb_y
     discounted_y = gross_y * disc
 
-    sv = (
-        (res_inv * _salvage_factor(sets, res_wacc, res_life)).sum("inv_step").sum("resource")
-        + (bat_inv * _salvage_factor(sets, bat_wacc, bat_life)).sum("inv_step")
-        + (gen_inv * _salvage_factor(sets, gen_wacc, gen_life)).sum("inv_step")
+    salvage_tail_memo = (
+        discounted_annuity_tail_memo(sets, ann_res, res_life, rs).sum("inv_step").sum("resource")
+        + discounted_annuity_tail_memo(sets, ann_bat, bat_life, rs).sum("inv_step")
+        + discounted_annuity_tail_memo(sets, ann_gen, gen_life, rs).sum("inv_step")
     )
-    H = float(int(sets.coords["year"].size))
-    sv_disc = float(sv) / ((1.0 + rs) ** H)
 
     rows = []
     years = sets.coords["year"].values.tolist()
     last_year = years[-1]
     for y in years:
-        salvage = sv_disc if y == last_year else 0.0
+        salvage = float(salvage_tail_memo) if y == last_year else 0.0
         row = {
             "year": y,
             "discount_factor": float(disc.sel(year=y)),
@@ -428,8 +418,8 @@ def build_discounted_cashflows_table_multi_year(
             "embedded_expected": float(emb_y.sel(year=y)),
             "total_before_discount": float(gross_y.sel(year=y)),
             "discounted_total": float(discounted_y.sel(year=y)),
-            "salvage_credit_discounted": salvage,
-            "discounted_net_with_salvage": float(discounted_y.sel(year=y)) - salvage,
+            "salvage_tail_memo_discounted": salvage,
+            "discounted_objective_contribution": float(discounted_y.sel(year=y)),
         }
         rows.append(row)
     return pd.DataFrame(rows)
