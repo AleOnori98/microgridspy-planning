@@ -6,6 +6,12 @@ import numpy as np
 import xarray as xr
 import linopy as lp
 
+from core.multi_year_model.lifecycle import (
+    discounted_annuity_tail_memo,
+    replacement_active_mask,
+    replacement_commission_mask,
+    year_ordinal,
+)
 from core.multi_year_model.params import get_params
 
 
@@ -52,94 +58,8 @@ def _crf(rate: xr.DataArray | float, lifetime: xr.DataArray | float) -> xr.DataA
     return xr.where(n > 0.0, crf_val, 0.0)
 
 
-def _year_ordinal(sets: xr.Dataset) -> xr.DataArray:
-    year = sets.coords["year"]
-    return xr.DataArray(
-        np.arange(1, int(year.size) + 1, dtype=float),
-        coords={"year": year},
-        dims=("year",),
-        name="year_ordinal",
-    )
-
-
-def _inv_step_start_ordinal(sets: xr.Dataset) -> xr.DataArray:
-    year_vals = [str(v) for v in sets.coords["year"].values.tolist()]
-    inv_vals = [str(v) for v in sets["inv_step_start_year"].values.tolist()]
-    idx_map = {y: i + 1 for i, y in enumerate(year_vals)}  # 1-based
-
-    out = []
-    for v in inv_vals:
-        if v not in idx_map:
-            raise InputValidationError(
-                f"inv_step_start_year '{v}' not found in sets.year labels {year_vals}"
-            )
-        out.append(float(idx_map[v]))
-
-    return xr.DataArray(
-        out,
-        coords={"inv_step": sets.coords["inv_step"]},
-        dims=("inv_step",),
-        name="inv_step_start_ordinal",
-    )
-
-
-def _service_years_matrix(sets: xr.Dataset) -> xr.DataArray:
-    y_ord = _year_ordinal(sets)
-    start_ord = _inv_step_start_ordinal(sets)
-    svc = (y_ord - start_ord + 1.0).transpose("inv_step", "year")
-    return svc
-
-
-def _cohort_active_mask(sets: xr.Dataset, lifetime_years: xr.DataArray | float) -> xr.DataArray:
-    """
-    Returns activity mask (0/1) over years for each investment cohort.
-    Output dims include at least (inv_step, year), plus any extra dims from lifetime.
-    """
-    svc = _service_years_matrix(sets)
-    lt = xr.DataArray(lifetime_years)
-    active = ((svc >= 1.0) & (svc <= lt)).astype(float)
-    return active
-
-
-def _cohort_commission_mask(sets: xr.Dataset) -> xr.DataArray:
-    svc = _service_years_matrix(sets)
-    return (svc == 1.0).astype(float)
-
-
-def _salvage_factor(
-    sets: xr.Dataset,
-    rate: xr.DataArray | float,
-    lifetime_years: xr.DataArray | float,
-) -> xr.DataArray:
-    """
-    Salvage fraction at horizon end, cohort-wise:
-      if rem > 0:
-        ((1+r)^LT - (1+r)^used) / ((1+r)^LT - 1)
-      else 0
-    with r==0 fallback: rem / LT
-    """
-    r = xr.DataArray(rate)
-    lt = xr.DataArray(lifetime_years)
-
-    H = float(int(sets.coords["year"].size))
-    start_ord = _inv_step_start_ordinal(sets)  # (inv_step,)
-    used = (H - start_ord + 1.0).clip(min=0.0)  # years in operation by horizon
-    rem = lt - used
-
-    one_plus = 1.0 + r
-    pow_lt = one_plus ** lt
-    pow_used = one_plus ** used
-    frac = (pow_lt - pow_used) / (pow_lt - 1.0)
-
-    frac_zero_rate = xr.where(lt > 0.0, rem / lt, 0.0)
-    frac = xr.where(r == 0.0, frac_zero_rate, frac)
-    frac = xr.where(rem > 0.0, frac, 0.0)
-    frac = xr.where(used > 0.0, frac, 0.0)
-    return frac
-
-
 def _discount_factor_by_year(sets: xr.Dataset, social_rate: float) -> xr.DataArray:
-    y_ord = _year_ordinal(sets)
+    y_ord = year_ordinal(sets)
     return 1.0 / ((1.0 + float(social_rate)) ** y_ord)
 
 
@@ -217,9 +137,11 @@ def initialize_objective(
     bat_annuity = bat_inv_present * _crf(bat_wacc, bat_life_y)
     gen_annuity = gen_inv_present * _crf(gen_wacc, gen_life_y)
 
-    res_active = _cohort_active_mask(sets, res_life_y)
-    bat_active = _cohort_active_mask(sets, bat_life_y)
-    gen_active = _cohort_active_mask(sets, gen_life_y)
+    # Automatic like-for-like replacements keep each investment cohort active
+    # from its commissioning year through the end of the planning horizon.
+    res_active = replacement_active_mask(sets)
+    bat_active = replacement_active_mask(sets)
+    gen_active = replacement_active_mask(sets)
 
     ann_res_y = (res_annuity * res_active).sum("inv_step").sum("resource")
     ann_bat_y = (bat_annuity * bat_active).sum("inv_step")
@@ -305,35 +227,35 @@ def initialize_objective(
     expected_cashflow_y = annuity_y + ((opex_y_s + ext_y_s) * w_s).sum("scenario")
 
     # Embedded emissions at commissioning year (optional)
-    commission = _cohort_commission_mask(sets)
+    commission_res = replacement_commission_mask(sets, res_life_y)
+    commission_bat = replacement_commission_mask(sets, bat_life_y)
+    commission_gen = replacement_commission_mask(sets, gen_life_y)
     em_cost_exp = (emission_cost * w_s).sum("scenario") if "scenario" in emission_cost.dims else emission_cost
 
     emb_y = 0.0
     if p.res_embedded_emissions_kgco2e_per_kw is not None:
         res_emb_fac = _require_finite_da("res_embedded_emissions_kgco2e_per_kw", p.res_embedded_emissions_kgco2e_per_kw)
         res_emb_kg = res_units * res_nom_kw * res_emb_fac
-        emb_y = emb_y + (res_emb_kg * commission).sum("inv_step").sum("resource") * em_cost_exp
+        emb_y = emb_y + (res_emb_kg * commission_res).sum("inv_step").sum("resource") * em_cost_exp
     if p.battery_embedded_emissions_kgco2e_per_kwh is not None:
         bat_emb_fac = _require_finite_da("battery_embedded_emissions_kgco2e_per_kwh", p.battery_embedded_emissions_kgco2e_per_kwh)
         bat_emb_kg = bat_units * bat_nom_kwh * bat_emb_fac
-        emb_y = emb_y + (bat_emb_kg * commission).sum("inv_step") * em_cost_exp
+        emb_y = emb_y + (bat_emb_kg * commission_bat).sum("inv_step") * em_cost_exp
     if p.generator_embedded_emissions_kgco2e_per_kw is not None:
         gen_emb_fac = _require_finite_da("generator_embedded_emissions_kgco2e_per_kw", p.generator_embedded_emissions_kgco2e_per_kw)
         gen_emb_kg = gen_units * gen_nom_kw * gen_emb_fac
-        emb_y = emb_y + (gen_emb_kg * commission).sum("inv_step") * em_cost_exp
+        emb_y = emb_y + (gen_emb_kg * commission_gen).sum("inv_step") * em_cost_exp
 
     total_cashflow_y = expected_cashflow_y + emb_y
 
-    # ------------------------------------------------------------------
-    # Salvage credit at horizon end
-    # ------------------------------------------------------------------
-    sv_res = (res_inv_present * _salvage_factor(sets, res_wacc, res_life_y)).sum("inv_step").sum("resource")
-    sv_bat = (bat_inv_present * _salvage_factor(sets, bat_wacc, bat_life_y)).sum("inv_step")
-    sv_gen = (gen_inv_present * _salvage_factor(sets, gen_wacc, gen_life_y)).sum("inv_step")
-    salvage_total = sv_res + sv_bat + sv_gen
+    # Reporting-only memo: tail of the last active replacement annuity beyond
+    # the horizon. It is intentionally excluded from the optimization objective
+    # to keep the annuity-based annual cashflow convention coherent.
+    salvage_tail_memo = (
+        discounted_annuity_tail_memo(sets, res_annuity, res_life_y, rs).sum("inv_step").sum("resource")
+        + discounted_annuity_tail_memo(sets, bat_annuity, bat_life_y, rs).sum("inv_step")
+        + discounted_annuity_tail_memo(sets, gen_annuity, gen_life_y, rs).sum("inv_step")
+    )
 
-    H = float(int(sets.coords["year"].size))
-    salvage_discount = 1.0 / ((1.0 + rs) ** H)
-
-    npwc = (total_cashflow_y * disc_y).sum("year") - salvage_total * salvage_discount
+    npwc = (total_cashflow_y * disc_y).sum("year")
     model.add_objective(npwc, overwrite=True)

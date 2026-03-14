@@ -6,6 +6,7 @@ import numpy as np
 import xarray as xr
 import linopy as lp
 
+from core.multi_year_model.lifecycle import replacement_active_mask, repeating_degradation_factor
 from core.multi_year_model.params import get_params
 
 
@@ -19,31 +20,12 @@ def _require_da(name: str, da: xr.DataArray | None) -> xr.DataArray:
     return da
 
 
-def _factor_from_degradation(
-    *,
-    sets: xr.Dataset,
-    degradation_rate: xr.DataArray | None,
-) -> xr.DataArray:
-    inv_step = sets.coords["inv_step"]
-    year = sets.coords["year"]
-    step_start = sets["inv_step_start_year"]
-
-    age = (year - step_start).clip(min=0).transpose("inv_step", "year").astype(float)
-    factor = xr.ones_like(age, dtype=float)
-
-    if degradation_rate is None:
-        return factor
-
-    rate = degradation_rate.clip(min=0.0)
-    factor = (1.0 - rate) ** age
-    return factor
-
-
 def _available_capacity_by_year(
     *,
     sets: xr.Dataset,
     units: lp.Variable,
     nominal_capacity: xr.DataArray,
+    lifetime_years: xr.DataArray | float,
     degradation_rate: xr.DataArray | None = None,
 ) -> xr.DataArray:
     """
@@ -52,9 +34,13 @@ def _available_capacity_by_year(
     Returns capacity with dims that include `year` and any non-investment dims
     from `units/nominal_capacity/degradation_rate` (e.g. scenario, resource).
     """
-    inv_active = sets["inv_active_in_year"]  # (inv_step, year)
+    inv_active = replacement_active_mask(sets)
     invest_cap = units * nominal_capacity
-    factor = _factor_from_degradation(sets=sets, degradation_rate=degradation_rate)
+    factor = repeating_degradation_factor(
+        sets=sets,
+        lifetime_years=lifetime_years,
+        degradation_rate=degradation_rate,
+    )
     available = (invest_cap * inv_active * factor).sum("inv_step")
     return available
 
@@ -193,6 +179,7 @@ def initialize_constraints(
         sets=sets,
         units=res_units,
         nominal_capacity=res_nom_kw,
+        lifetime_years=p.res_lifetime_years,
         degradation_rate=p.res_capacity_degradation_rate_per_year,
     ) * res_inv_eta
     model.add_constraints(
@@ -213,6 +200,7 @@ def initialize_constraints(
         sets=sets,
         units=gen_units,
         nominal_capacity=gen_nom_kw,
+        lifetime_years=p.generator_lifetime_years,
         degradation_rate=p.generator_capacity_degradation_rate_per_year,
     )
     model.add_constraints(gen_gen <= gen_cap_available, name="generator_generation_cap")
@@ -249,6 +237,7 @@ def initialize_constraints(
         sets=sets,
         units=bat_units,
         nominal_capacity=bat_nom_kwh,
+        lifetime_years=p.battery_calendar_lifetime_years,
         degradation_rate=p.battery_capacity_degradation_rate_per_year,
     )
 
