@@ -7,6 +7,8 @@ import numpy as np
 import xarray as xr
 import linopy as lp
 
+from core.typical_year_model.params import get_params
+
 
 class InputValidationError(RuntimeError):
     pass
@@ -48,7 +50,8 @@ def initialize_objective(
       - grid export revenue (if allow_export)
       - renewable production subsidy (revenue)
       - lost load penalty (if any)
-      - emissions cost (if emission_cost_per_kgco2e > 0)
+      - emissions cost for scope 1, scope 2 (if on-grid), and scope 3
+        (if emission_cost_per_kgco2e > 0)
     """
     if not isinstance(sets, xr.Dataset):
         raise InputValidationError("initialize_objective: sets must be an xarray.Dataset.")
@@ -70,13 +73,12 @@ def initialize_objective(
     resource = sets.coords["resource"]
     period = sets.coords["period"]
 
-    w_s = data["scenario_weight"]  # (scenario,)
+    p = get_params(data)
+    w_s = p.scenario_weight  # (scenario,)
 
     # Flags
-    settings = (data.attrs or {}).get("settings", {})
-    grid_settings = (settings.get("grid", {}) or {})
-    on_grid = bool(grid_settings.get("on_grid", False))
-    allow_export = bool(grid_settings.get("allow_export", False))
+    on_grid = p.is_grid_on()
+    allow_export = p.is_grid_export_enabled()
 
     # ------------------------------------------------------------------
     # Variables
@@ -98,45 +100,51 @@ def initialize_objective(
     # Tech parameters (from your current data.py naming)
     # ------------------------------------------------------------------
     # Renewables
-    res_nom_kw = data["res_nominal_capacity_kw"]                         # (resource,)
-    res_capex_kw = data["res_specific_investment_cost_per_kw"]           # (resource,)
-    res_life_y = data["res_lifetime_years"]                              # (resource,)
-    res_wacc= data["res_wacc"]                                           # (resource,)
-    res_grant = data["res_grant_share_of_capex"]                         # (resource,)
+    res_nom_kw = p.res_nominal_capacity_kw                         # (resource,)
+    res_capex_kw = p.res_specific_investment_cost_per_kw           # (resource,)
+    res_life_y = p.res_lifetime_years                              # (resource,)
+    res_wacc = p.res_wacc                                           # (resource,)
+    res_grant = p.res_grant_share_of_capex                         # (resource,)
     # scenario-dependent
-    res_fom_share = data["res_fixed_om_share_per_year"]                  # (scenario, resource)
-    res_subsidy_kwh = data["res_production_subsidy_per_kwh"]             # (scenario, resource)
-    res_emb_kg_per_kw = data["res_embedded_emissions_kgco2e_per_kw"]      # (scenario, resource)
+    res_fom_share = p.res_fixed_om_share_per_year                  # (scenario, resource)
+    res_subsidy_kwh = p.res_production_subsidy_per_kwh             # (scenario, resource)
+    res_emb_kg_per_kw = p.res_embedded_emissions_kgco2e_per_kw      # (scenario, resource)
 
     # Battery
-    bat_nom_kwh = data["battery_nominal_capacity_kwh"]                   # scalar
-    bat_capex_kwh = data["battery_specific_investment_cost_per_kwh"]     # scalar
-    bat_life_y = data["battery_calendar_lifetime_years"]                 # scalar
-    bat_wacc = data["battery_wacc"]                                       # scalar
-    bat_fom_share = data["battery_fixed_om_share_per_year"]              # (scenario,)
-    bat_emb_kg_per_kwh = data["battery_embedded_emissions_kgco2e_per_kwh"]  # (scenario,)
+    bat_nom_kwh = p.battery_nominal_capacity_kwh                   # scalar
+    bat_capex_kwh = p.battery_specific_investment_cost_per_kwh     # scalar
+    bat_life_y = p.battery_calendar_lifetime_years                 # scalar
+    bat_wacc = p.battery_wacc                                       # scalar
+    bat_fom_share = p.battery_fixed_om_share_per_year              # (scenario,)
+    bat_emb_kg_per_kwh = p.battery_embedded_emissions_kgco2e_per_kwh  # (scenario,)
 
     # Generator
-    gen_nom_kw = data["generator_nominal_capacity_kw"]                  # scalar
-    gen_capex_kw = data["generator_specific_investment_cost_per_kw"]    # scalar
-    gen_life_y = data["generator_lifetime_years"]                       # scalar
-    gen_wacc = data["generator_wacc"]                                   # scalar
-    gen_fom_share = data["generator_fixed_om_share_per_year"]           # (scenario,)
-    gen_emb_kg_per_kw = data["generator_embedded_emissions_kgco2e_per_kw"]  # (scenario,)
+    gen_nom_kw = p.generator_nominal_capacity_kw                  # scalar
+    gen_capex_kw = p.generator_specific_investment_cost_per_kw    # scalar
+    gen_life_y = p.generator_lifetime_years                       # scalar
+    gen_wacc = p.generator_wacc                                   # scalar
+    gen_fom_share = p.generator_fixed_om_share_per_year           # (scenario,)
+    gen_emb_kg_per_kw = p.generator_embedded_emissions_kgco2e_per_kw  # (scenario,)
 
     # Fuel (scenario-dependent)
-    fuel_cost = data["fuel_fuel_cost_per_unit_fuel"]                           # (scenario,)
-    fuel_dir_kg_per_unit = data["fuel_direct_emissions_kgco2e_per_unit_fuel"]  # (scenario,)
+    fuel_cost = p.fuel_fuel_cost_per_unit_fuel                           # (scenario,)
+    fuel_dir_kg_per_unit = p.fuel_direct_emissions_kgco2e_per_unit_fuel  # (scenario,)
 
     # Grid prices (if on-grid)
     if on_grid:
-        grid_import_price = data["grid_import_price"]                    # (period, scenario)
+        grid_import_price = p.grid_import_price                    # (period, scenario)
+        grid_eta = p.grid_transmission_efficiency if p.grid_transmission_efficiency is not None else 1.0
+        grid_em_factor = (
+            p.grid_emissions_factor_kgco2e_per_kwh
+            if p.grid_emissions_factor_kgco2e_per_kwh is not None
+            else 0.0
+        )
         if allow_export:
-            grid_export_price = data["grid_export_price"]                # (period, scenario)
+            grid_export_price = p.grid_export_price                # (period, scenario)
 
     # Policy / externalities
-    lost_load_cost = data["lost_load_cost_per_kwh"]                      # scalar or (scenario,)
-    emission_cost = data["emission_cost_per_kgco2e"]                     # scalar or (scenario,)
+    lost_load_cost = p.lost_load_cost_per_kwh                      # scalar or (scenario,)
+    emission_cost = p.emission_cost_per_kgco2e                     # scalar or (scenario,)
 
     # ------------------------------------------------------------------
     # 1) Annualized investment cost (scenario-invariant CAPEX annuity + expected FOM)
@@ -208,6 +216,15 @@ def initialize_objective(
     # ------------------------------------------------------------------
     # Direct operational emissions from fuel
     direct_ops_kg_s = fuel_cons.sum("period") * fuel_dir_kg_per_unit  # (scenario,)
+    scope2_grid_kg_s = (
+        (grid_imp * grid_eta).sum("period") * grid_em_factor
+        if on_grid and grid_imp is not None
+        else xr.DataArray(
+            np.zeros((int(scenario.size),), dtype=float),
+            coords={"scenario": scenario},
+            dims=("scenario",),
+        )
+    )
 
     # Embodied emissions (annualized by lifetime)
     # Renewables: (cap_res_kw[resource] * emb_kg_per_kw[scenario,resource] / life_y[resource]) -> (scenario,)
@@ -215,7 +232,7 @@ def initialize_objective(
     embodied_kg_gen_s = (cap_gen_kw * gen_emb_kg_per_kw) / gen_life_y                      # (scenario,)
     embodied_kg_bat_s = (cap_bat_kwh * bat_emb_kg_per_kwh) / bat_life_y                    # (scenario,)
     embodied_kg_s = embodied_kg_res_s + embodied_kg_gen_s + embodied_kg_bat_s              # (scenario,)
-    emissions_cost_s = emission_cost * (direct_ops_kg_s + embodied_kg_s)                   # (scenario,)
+    emissions_cost_s = emission_cost * (direct_ops_kg_s + scope2_grid_kg_s + embodied_kg_s)  # (scenario,)
 
     # Total externalities cost
     externalities_cost_s = ll_cost_s + emissions_cost_s  # (scenario,)

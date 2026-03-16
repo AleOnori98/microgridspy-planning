@@ -13,6 +13,7 @@ from core.typical_year_model.data import initialize_data
 from core.typical_year_model.variables import initialize_vars
 from core.typical_year_model.constraints import initialize_constraints
 from core.typical_year_model.objective import initialize_objective
+from core.io.utils import tee_console_output
 
 
 class InputValidationError(RuntimeError):
@@ -137,6 +138,21 @@ class SteadyStateModel:
         # If nothing worked, at least create a placeholder so UI does not mislead
         problem_fn.write_text("[Could not export via linopy API in this environment]\n", encoding="utf-8")
 
+    def _ensure_log_artifact(self, solver: str) -> None:
+        if self._last_log_path is None:
+            return
+        if self._last_log_path.exists() and self._last_log_path.stat().st_size > 0:
+            return
+        self._last_log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._last_log_path.write_text(
+            (
+                f"Solver: {solver}\n"
+                "No solver log was produced by the current linopy/solver backend.\n"
+                "The solve still completed, but the backend did not emit a file-based log.\n"
+            ),
+            encoding="utf-8",
+        )
+
     # ---------------------------------------------------------------------
     # Solve
     # ---------------------------------------------------------------------
@@ -182,7 +198,12 @@ class SteadyStateModel:
             pass
 
         # Solve call
-        result = self.model.solve(solver_name=solver, **solve_kwargs) if "solver_name" in getattr(self.model.solve, "__code__", object()).co_varnames else self.model.solve(solver, **solve_kwargs)
+        if self._last_log_path is not None:
+            with tee_console_output(self._last_log_path):
+                result = self.model.solve(solver_name=solver, **solve_kwargs) if "solver_name" in getattr(self.model.solve, "__code__", object()).co_varnames else self.model.solve(solver, **solve_kwargs)
+        else:
+            result = self.model.solve(solver_name=solver, **solve_kwargs) if "solver_name" in getattr(self.model.solve, "__code__", object()).co_varnames else self.model.solve(solver, **solve_kwargs)
+        self._ensure_log_artifact(solver)
 
         # Linopy stores solution on the model
         sol = getattr(self.model, "solution", None)

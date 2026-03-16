@@ -1,53 +1,62 @@
 meta:
   units:
-    nominal_capacity: kWh
-    specific_investment_cost: currency_per_kWh
-    embedded_emissions: kgCO2e_per_kWh
-    max_charge_time: hours
-    max_discharge_time: hours
-    calendar_lifetime: years
-    energy_degradation_rate: per_year
-    capacity_degradation_rate: per_year
+    battery_nominal_capacity_kwh: kWh
+    battery_specific_investment_cost_per_kwh: currency_per_kWh
+    battery_wacc: '-'
+    battery_calendar_lifetime_years: years
+    battery_embedded_emissions_kgco2e_per_kwh: kgCO2e_per_kWh
+    battery_charge_efficiency: '-'
+    battery_discharge_efficiency: '-'
+    battery_initial_soc: share
+    battery_depth_of_discharge: share
+    battery_max_discharge_time_hours: hours
+    battery_max_charge_time_hours: hours
+    battery_max_installable_capacity_kwh: kWh
+    battery_fixed_om_share_per_year: share_per_year
+    battery_capacity_degradation_rate_per_year: per_year
   context:
     formulation: dynamic
-    multi_scenario: true
+    multi_scenario: false
     scenarios:
     - scenario_1
-    - scenario_2
-    capacity_expansion: true
-    investment_steps:
-    - step: step_1
-      duration_years: 2
-    - step: step_2
-      duration_years: 2
-  notes:
-  - Battery cohort differences are allowed only for investment-side parameters (by_step).
-  - Technical parameters are step-invariant (shared across cohorts).
-  - Operation parameters are scenario-dependent only (not step-dependent).
-  - O&M is expressed as a share of total CAPEX per year.
-  - initial_soc is expressed as fraction of usable capacity (0..1).
-  - depth_of_discharge defines the usable fraction of nominal capacity; ensure consistency
-    with your SOC convention.
-  - Degradation is specified as single annual rates (/year), scenario-dependent; no
-    year-by-year curves.
-  - Set degradation rates to 0.0 to disable energy and/or capacity degradation effects.
+    capacity_expansion: false
+    investment_steps: null
+  description:
+    summary: Battery inputs define cohort-dependent investment data, shared technical
+      behavior, and scenario-dependent operating assumptions.
+    parameters:
+      battery_nominal_capacity_kwh: Nominal energy capacity represented by one battery
+        unit.
+      battery_specific_investment_cost_per_kwh: Specific investment cost of battery
+        capacity.
+      battery_wacc: Weighted average cost of capital used for battery annuities.
+      battery_calendar_lifetime_years: Calendar lifetime used for battery replacement
+        economics.
+      battery_embedded_emissions_kgco2e_per_kwh: Embodied emissions associated with
+        battery capacity.
+      battery_charge_efficiency: Battery charging efficiency.
+      battery_discharge_efficiency: Battery discharging efficiency.
+      battery_initial_soc: Initial state of charge as a share of usable capacity.
+      battery_depth_of_discharge: Usable fraction of nominal battery capacity.
+      battery_max_discharge_time_hours: Minimum time needed to fully discharge at
+        nominal power.
+      battery_max_charge_time_hours: Minimum time needed to fully charge at nominal
+        power.
+      battery_max_installable_capacity_kwh: Upper bound on total installed battery
+        capacity.
+      battery_fixed_om_share_per_year: Fixed annual O&M cost expressed as a share
+        of battery CAPEX.
+      battery_capacity_degradation_rate_per_year: Annual reduction in effective battery
+        capacity in the dynamic formulation.
 battery:
   label: Battery
   investment:
     by_step:
-      step_1:
+      base:
         nominal_capacity_kwh: 1.0
-        specific_investment_cost_per_kwh: 0.0
-        wacc: 0.0
+        specific_investment_cost_per_kwh: 350
+        wacc: 0.05
         calendar_lifetime_years: 10
-        max_installable_capacity_kwh: null
-        embedded_emissions_kgco2e_per_kwh: 0.0
-      step_2:
-        nominal_capacity_kwh: 1.0
-        specific_investment_cost_per_kwh: 0.0
-        wacc: 0.0
-        calendar_lifetime_years: 10
-        max_installable_capacity_kwh: null
         embedded_emissions_kgco2e_per_kwh: 0.0
   technical:
     charge_efficiency: 1.0
@@ -56,13 +65,9 @@ battery:
     depth_of_discharge: 0.8
     max_discharge_time_hours: 5.0
     max_charge_time_hours: 5.0
+    max_installable_capacity_kwh: null
   operation:
     by_scenario:
       scenario_1:
-        fixed_om_share_per_year: 0.0
-        energy_degradation_rate_per_year: 0.0
-        capacity_degradation_rate_per_year: 0.0
-      scenario_2:
-        fixed_om_share_per_year: 0.0
-        energy_degradation_rate_per_year: 0.0
+        fixed_om_share_per_year: 0.02
         capacity_degradation_rate_per_year: 0.0

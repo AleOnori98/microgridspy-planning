@@ -1,4 +1,3 @@
-# generation_planning/modeling/constraints.py
 from __future__ import annotations
 
 from typing import Dict
@@ -7,29 +6,95 @@ import numpy as np
 import xarray as xr
 import linopy as lp
 
-from core.multi_year_model import model
+from core.multi_year_model.lifecycle import replacement_active_mask, repeating_degradation_factor
+from core.multi_year_model.params import get_params
 
 
 class InputValidationError(RuntimeError):
     pass
 
 
-def _bool_from_attrs(obj: xr.Dataset, path: list[str], default: bool = False) -> bool:
-    cur = obj.attrs
-    for k in path:
-        if not isinstance(cur, dict) or k not in cur:
-            return default
-        cur = cur[k]
-    return bool(cur)
+def _require_da(name: str, da: xr.DataArray | None) -> xr.DataArray:
+    if da is None:
+        raise InputValidationError(f"Missing required parameter/data variable: '{name}'")
+    return da
 
 
-def _str_from_attrs(obj: xr.Dataset, path: list[str], default: str = "") -> str:
-    cur = obj.attrs
-    for k in path:
-        if not isinstance(cur, dict) or k not in cur:
-            return default
-        cur = cur[k]
-    return str(cur)
+def _available_capacity_by_year(
+    *,
+    sets: xr.Dataset,
+    units: lp.Variable,
+    nominal_capacity: xr.DataArray,
+    lifetime_years: xr.DataArray | float,
+    degradation_rate: xr.DataArray | None = None,
+) -> xr.DataArray:
+    """
+    Generic linear capacity availability from incremental investments.
+
+    Returns capacity with dims that include `year` and any non-investment dims
+    from `units/nominal_capacity/degradation_rate` (e.g. scenario, resource).
+    """
+    inv_active = replacement_active_mask(sets)
+    invest_cap = units * nominal_capacity
+    factor = repeating_degradation_factor(
+        sets=sets,
+        lifetime_years=lifetime_years,
+        degradation_rate=degradation_rate,
+    )
+    available = (invest_cap * inv_active * factor).sum("inv_step")
+    return available
+
+
+def _is_effectively_positive(da: xr.DataArray | None) -> bool:
+    if da is None:
+        return False
+    vals = np.asarray(da.values, dtype=float)
+    vals = vals[np.isfinite(vals)]
+    if vals.size == 0:
+        return False
+    return float(vals.max()) > 0.0
+
+
+def validate_constraint_shapes(
+    *,
+    sets: xr.Dataset,
+    p: object,
+    vars: Dict[str, lp.Variable],
+) -> None:
+    required_sets = ("period", "year", "inv_step", "scenario", "resource")
+    for c in required_sets:
+        if c not in sets.coords:
+            raise InputValidationError(f"initialize_constraints: missing required coord in sets: '{c}'")
+
+    required_vars = (
+        "res_units",
+        "battery_units",
+        "generator_units",
+        "res_generation",
+        "generator_generation",
+        "fuel_consumption",
+        "battery_charge",
+        "battery_discharge",
+        "battery_soc",
+        "lost_load",
+    )
+    for v in required_vars:
+        if v not in vars:
+            raise InputValidationError(f"initialize_constraints: missing required variable '{v}'")
+
+    required_data = (
+        ("load_demand", p.load_demand, {"period", "year", "scenario"}),
+        ("resource_availability", p.resource_availability, {"period", "year", "scenario", "resource"}),
+        ("scenario_weight", p.scenario_weight, {"scenario"}),
+        ("min_renewable_penetration", p.min_renewable_penetration, set()),
+        ("max_lost_load_fraction", p.max_lost_load_fraction, set()),
+    )
+    for name, da, expected_any in required_data:
+        da_req = _require_da(name, da)
+        if expected_any and not expected_any.issubset(set(da_req.dims)):
+            raise InputValidationError(
+                f"Parameter '{name}' has dims {da_req.dims}, expected at least {sorted(expected_any)}"
+            )
 
 
 def initialize_constraints(
@@ -38,15 +103,6 @@ def initialize_constraints(
     vars: Dict[str, lp.Variable],
     model: lp.Model,
 ) -> None:
-    """
-    Add steady_state (typical-year) constraints to the linopy model.
-
-    Conventions (consistent with your current implementation):
-      - period = 0..8759
-      - scenario optional but present always (scenario_1 if disabled)
-      - renewables availability in data["resource_availability"] with dims (period, scenario, resource)
-      - "units" design variables scale nominal capacities from YAML templates
-    """
     if not isinstance(sets, xr.Dataset):
         raise InputValidationError("initialize_constraints: `sets` must be an xarray.Dataset.")
     if not isinstance(data, xr.Dataset):
@@ -54,338 +110,223 @@ def initialize_constraints(
     if not isinstance(vars, dict):
         raise InputValidationError("initialize_constraints: `vars` must be a dict of linopy variables.")
 
-    # ---------------------------------------------------------------------
-    # Coords
-    # ---------------------------------------------------------------------
-    for c in ("period", "year", "inv_step", "scenario", "resource"):
-        if c not in sets.coords:
-            raise InputValidationError(f"initialize_constraints: missing required coord in sets: '{c}'")
-
     period = sets.coords["period"]
-    year = sets.coords["year"]
-    inv_step = sets.coords["inv_step"]
-    scenario = sets.coords["scenario"]
 
-    # ---------------------------------------------------------------------
-    # Flags and enforcement mode (from attrs)
-    # ---------------------------------------------------------------------
-    on_grid = _bool_from_attrs(data, ["settings", "grid", "on_grid"], default=False)
-    allow_export = _bool_from_attrs(data, ["settings", "grid", "allow_export"], default=False)
-    enforcement = _str_from_attrs(
-        data,
-        ["settings", "optimization_constraints", "enforcement"],
-        default="scenario_wise",
-    )
+    p = get_params(data)
+    validate_constraint_shapes(sets=sets, p=p, vars=vars)
+
+    on_grid = p.is_grid_on()
+    allow_export = p.is_grid_export_enabled()
+    enforcement = str((p.settings.get("optimization_constraints", {}) or {}).get("enforcement", "scenario_wise"))
     if enforcement not in ("expected", "scenario_wise"):
         raise InputValidationError(
             f"Invalid optimization_constraints.enforcement='{enforcement}'. "
             "Allowed: 'expected' | 'scenario_wise'."
         )
 
-    # ---------------------------------------------------------------------
-    # Parameters (data vars)
-    # ---------------------------------------------------------------------
-    # Time series
-    load_demand = data["load_demand"]  # (period, year, scenario)
-    resource_availability = data["resource_availability"]  # (period, year, scenario, resource)
+    load_demand = _require_da("load_demand", p.load_demand)
+    resource_availability = _require_da("resource_availability", p.resource_availability)
+    scenario_weight = _require_da("scenario_weight", p.scenario_weight)
 
-    # Scenario weights (always present)
-    w_s = data["scenario_weight"]  # (scenario,)
+    min_res_pen = _require_da("min_renewable_penetration", p.min_renewable_penetration)
+    max_ll_frac = _require_da("max_lost_load_fraction", p.max_lost_load_fraction)
 
-    # -----------------------------
-    # Renewables
-    # -----------------------------
-    # Technical (step-invariant)
-    res_nom_kw = data["res_nominal_capacity_kw"]          # (resource,)
-    res_inv_eta = data["res_inverter_efficiency"]         # (resource,)
+    res_nom_kw = _require_da("res_nominal_capacity_kw", p.res_nominal_capacity_kw)
+    res_inv_eta = _require_da("res_inverter_efficiency", p.res_inverter_efficiency)
+    res_max_kw = _require_da("res_max_installable_capacity_kw", p.res_max_installable_capacity_kw)
 
-    # Constraints / siting (step-invariant)
-    land_m2 = data["land_availability_m2"]                        # scalar
-    res_area_m2_per_kw = data["res_specific_area_m2_per_kw"]      # (resource,)
-    res_max_kw = data["res_max_installable_capacity_kw"]          # (resource,) may contain NaN
+    bat_nom_kwh = _require_da("battery_nominal_capacity_kwh", p.battery_nominal_capacity_kwh)
+    eta_c = _require_da("battery_charge_efficiency", p.battery_charge_efficiency)
+    eta_d = _require_da("battery_discharge_efficiency", p.battery_discharge_efficiency)
+    soc0 = _require_da("battery_initial_soc", p.battery_initial_soc)
+    dod = _require_da("battery_depth_of_discharge", p.battery_depth_of_discharge)
+    t_ch = _require_da("battery_max_charge_time_hours", p.battery_max_charge_time_hours)
+    t_dis = _require_da("battery_max_discharge_time_hours", p.battery_max_discharge_time_hours)
 
-    # Dynamic-only degradation (scenario-dependent only)
-    res_deg_capacity = data["res_capacity_degradation_rate_per_year"] # (scenario, resource)
+    gen_nom_kw = _require_da("generator_nominal_capacity_kw", p.generator_nominal_capacity_kw)
+    gen_max_kw = _require_da("generator_max_installable_capacity_kw", p.generator_max_installable_capacity_kw)
+    gen_eta_full = _require_da("generator_nominal_efficiency_full_load", p.generator_nominal_efficiency_full_load)
+    fuel_lhv = _require_da("fuel_lhv_kwh_per_unit_fuel", p.fuel_lhv_kwh_per_unit_fuel)
 
-    # -----------------------------
-    # Battery
-    # -----------------------------
-    # Investment-side (step-dependent, scenario-invariant)
-    bat_nom_kwh = data["battery_nominal_capacity_kwh"]                 # (inv_step,)
-    bat_capex_kwh = data["battery_specific_investment_cost_per_kwh"]   # (inv_step,)
-    bat_wacc = data["battery_wacc"]                                     # (inv_step,)
-    bat_cal_life = data["battery_calendar_lifetime_years"]             # (inv_step,)
-    bat_max_kwh = data["battery_max_installable_capacity_kwh"]         # (inv_step,) may contain NaN
+    land_m2 = _require_da("land_availability_m2", p.land_availability_m2)
+    res_area_m2_per_kw = _require_da("res_specific_area_m2_per_kw", p.res_specific_area_m2_per_kw)
 
-    # Technical (step-invariant scalars) 
-    bat_eta_c = data["battery_charge_efficiency"]          # ()  
-    bat_eta_d = data["battery_discharge_efficiency"]       # ()
-    bat_soc0 = data["battery_initial_soc"]                 # ()
-    bat_dod = data["battery_depth_of_discharge"]           # ()
-    bat_t_ch = data["battery_max_charge_time_hours"]       # ()
-    bat_t_dis = data["battery_max_discharge_time_hours"]   # ()
-
-    # Dynamic-only degradation (scenario-dependent, optional)
-    bat_deg_capacity = data["battery_capacity_degradation_rate_per_year"] # (scenario,) default 0.0 if missing
-
-    # -----------------------------
-    # Generator
-    # -----------------------------
-    # Investment-side (step-dependent)
-    gen_nom_kw = data["generator_nominal_capacity_kw"]                 # (inv_step,)
-    gen_max_kw = data["generator_max_installable_capacity_kw"]         # (inv_step,)
-
-    # Technical (step-invariant scalar)
-    gen_eta_full = data["generator_nominal_efficiency_full_load"]      # ()
-
-    # Operation (scenario-dependent)
-    gen_deg_capacity = data.get("generator_capacity_degradation_rate_per_year", 0.0) # (scenario,) if present
-    fuel_lhv = data["fuel_lhv_kwh_per_unit_fuel"]                                    # (scenario,)
-
-    # -----------------------------
-    # System constraints params
-    # -----------------------------
-    min_res_pen = data["min_renewable_penetration"]   # scalar or (scenario,)
-    max_ll_frac = data["max_lost_load_fraction"]      # scalar or (scenario,)
-
-    # -----------------------------
-    # Grid params (if on-grid)
-    # -----------------------------
     if on_grid:
-        line_cap_kw = data["grid_line_capacity_kw"]            # (scenario,) 
-        grid_eta = data["grid_transmission_efficiency"]        # (scenario,) 
-        grid_avail = data["grid_availability"]                 # (period, year, scenario)
-        allow_export = bool(data.attrs.get("settings", {}).get("grid", {}).get("allow_export", False))
+        grid_line_cap = _require_da("grid_line_capacity_kw", p.grid_line_capacity_kw)
+        grid_eta = _require_da("grid_transmission_efficiency", p.grid_transmission_efficiency)
+        grid_ren_share = _require_da("grid_renewable_share", p.grid_renewable_share)
+        grid_availability = _require_da("grid_availability", p.grid_availability)
 
-    # ---------------------------------------------------------------------
-    # Variables (aliases) 
-    # ---------------------------------------------------------------------
-    # Design / sizing (scenario-invariant)
-    res_units = vars["res_units"]          # (inv_step, resource)
-    bat_units = vars["battery_units"]      # (inv_step,)
-    gen_units = vars["generator_units"]    # (inv_step,)
+    res_units = vars["res_units"]  # (inv_step, resource)
+    bat_units = vars["battery_units"]  # (inv_step,)
+    gen_units = vars["generator_units"]  # (inv_step,)
 
-    # Operation
-    res_gen = vars["res_generation"]          # (period, year, scenario, resource)
-    gen_gen = vars["generator_generation"]    # (period, year, scenario)
-    fuel_cons = vars["fuel_consumption"]      # (period, year, scenario)
-    bat_ch = vars["battery_charge"]           # (period, year, scenario)
-    bat_dis = vars["battery_discharge"]       # (period, year, scenario)
-    soc = vars["battery_soc"]                 # (period, year, scenario)
-    ll = vars["lost_load"]                    # (period, year, scenario)
-
-    grid_imp = vars.get("grid_import", None)  # (period, year, scenario) if on_grid
-    grid_exp = vars.get("grid_export", None)  # (period, year, scenario) if allow_export
-
-    # Optional partial-load scaffolding
-    gen_seg = vars.get("gen_segment_energy", None)  # (period, year, scenario, curve_point) if enabled
-
-    # ---------------------------------------------------------------------
-    # 1) Renewable generation limited by availability and installed capacity with degradation (energy + capacity), cohort-based
-    # res_gen(t,y,s,r) <= avail(t,y,s,r) * sum_k [ active(k,y) * units(k,r) * nom_kw(r) * inv_eta(r)
-    #                                             * (1 - cap_deg(s,r))^age(k,y)
-    #                                             * (1 - energy_deg(s,r))^age(k,y) ]
-    # ---------------------------------------------------------------------
-
-    inv_active = sets["inv_active_in_year"]        # (inv_step, year) {0,1}
-    step_start = sets["inv_step_start_year"]       # (inv_step,) year label (e.g. 2026)
-    years = sets.coords["year"]                    # (year,) year labels (e.g. 2026..)
-
-    # cohort age in each year: age(inv_step, year)
-    # age = max(0, year - step_start)
-    age = (years - step_start).clip(min=0)         # xarray broadcasting -> (inv_step, year)
-    age = age.astype(float)
-
-    # Broadcast age to include scenario/resource
-    age = age.expand_dims({"scenario": sets.coords["scenario"], "resource": sets.coords["resource"]})
-
-    # Broadcast rates to include inv_step/year
-    cap_rate = res_deg_capacity.expand_dims({"inv_step": sets.coords["inv_step"], "year": years})
-
-    # Degradation factors per cohort/year/scenario/resource
-    cap_factor = (1.0 - cap_rate) ** age
-
-    # Put dimensions in a convenient order for later broadcasting
-    cap_factor = cap_factor.transpose("inv_step", "year", "scenario", "resource")
-
-    # Convert units to kW per cohort
-    res_kw_by_step = res_units * res_nom_kw       # (inv_step, resource)
-
-    # Apply active mask (inv_step, year) to cohort capacity
-    active = inv_active.expand_dims({"scenario": sets.coords["scenario"], "resource": sets.coords["resource"]})
-    active = active.transpose("inv_step", "year", "scenario", "resource")
-
-    # Expand res_kw_by_step to include year/scenario for broadcasting
-    res_kw = res_kw_by_step.expand_dims({"year": years, "scenario": sets.coords["scenario"]})
-    res_kw = res_kw.transpose("inv_step", "year", "scenario", "resource")
-
-    # Effective available kW (after cohort degradation) before inverter efficiency
-    res_kw_eff = (active * res_kw * cap_factor).sum("inv_step")     # (year, scenario, resource)
-
-    # Apply inverter efficiency (resource,) -> broadcast to (year, scenario, resource)
-    res_kw_eff = res_kw_eff * res_inv_eta
-
-    rhs_res = resource_availability * res_kw_eff   # (period, year, scenario, resource)
-    model.add_constraints(res_gen <= rhs_res, name="res_generation_cap")
-
-    # ---------------------------------------------------------------------
-    # 2) Renewable max installable capacity (global cap across horizon)
-    # Constraint:
-    #   sum_k res_units(k,r) * res_nom_kw(r) <= res_max_kw(r)   for finite res_max_kw
-    # ---------------------------------------------------------------------
-    finite = np.isfinite(res_max_kw)
-    res_max_kw_finite = res_max_kw.where(finite, drop=True)
-
-    if res_max_kw_finite.sizes.get("resource", 0) > 0:
-        r = res_max_kw_finite.resource
-
-        lhs = (res_units.sel(resource=r).sum("inv_step") * res_nom_kw.sel(resource=r))
-        rhs = res_max_kw_finite
-
-        model.add_constraints(lhs <= rhs, name="res_max_installable_capacity")
-
-    # ---------------------------------------------------------------------
-    # 3) Generator production capacity (multi-year)
-    #
-    # gen_gen(t,y,s) <= available_gen_kw(y,s)
-    # where available_gen_kw(y,s) = [ sum_k inv_active_in_year(k,y) * gen_units(k) * gen_nom_kw(k) ] * (1 - cap_deg)^(age)
-    # ---------------------------------------------------------------------
-
-    inv_active = sets["inv_active_in_year"]  # (inv_step, year) 0/1
-
-    # cohort age matrix (inv_step, year) in years
-    # uses your sets metadata:
-    step_start_year = sets["inv_step_start_year"]  # (inv_step,) year labels like 2026
-    year_labels = sets.coords["year"]              # (year,) same type (ints)
-
-    # age(k,y) = max(0, year - step_start_year[k])
-    age = (year_labels - step_start_year).clip(min=0)  # broadcasts to (inv_step, year)
-
-    # derating factor per (scenario, inv_step, year)
-    # factor = (1 - rate) ** age
-    derate = (1.0 - gen_deg_capacity).clip(min=0.0) ** age  # broadcasts to (scenario, inv_step, year)
-
-    # degraded available kW per (scenario, year):
-    gen_kw_in_year_degraded = (inv_active * gen_units * gen_nom_kw * derate).sum("inv_step")  # (scenario, year)
-
-    # align to (year, scenario) for multiplication with gen_gen(period, year, scenario)
-    gen_kw_rhs = gen_kw_in_year_degraded.transpose("year", "scenario")  # (year, scenario)
-
-    # final constraint: broadcast over period
-    model.add_constraints(gen_gen <= gen_kw_rhs, name="generator_generation_cap")
-
-    # ---------------------------------------------------------------------
-    # 4) Fuel ↔ energy relationship
-    #   - If no partial-load curve: equality with nominal efficiency
-    #   - If partial-load enabled: convex piecewise lower bound on fuel_cons
-    # ---------------------------------------------------------------------
-
-    pl_rel = data.get("generator_eff_curve_rel_power", None)
-    pl_eff = data.get("generator_eff_curve_eff", None)
-
-    pl_points_ok = (
-        pl_rel is not None and pl_eff is not None
-        and ("curve_point" in pl_rel.dims) and ("curve_point" in pl_eff.dims)
-        and (pl_rel.sizes["curve_point"] >= 2)
+    res_gen = vars["res_generation"]  # (period, year, scenario, resource)
+    gen_gen = vars["generator_generation"]  # (period, year, scenario)
+    fuel_cons = vars["fuel_consumption"]  # (period, year, scenario)
+    bat_ch = vars["battery_charge"]  # (period, year, scenario)
+    bat_dis = vars["battery_discharge"]  # (period, year, scenario)
+    soc = vars["battery_soc"]  # (period, year, scenario)
+    ll = vars["lost_load"]  # (period, year, scenario)
+    grid_imp = vars.get("grid_import")
+    grid_exp = vars.get("grid_export")
+    # ------------------------------------------------------------------
+    # 1) Renewable generation capacity with year availability
+    # ------------------------------------------------------------------
+    res_cap_available = _available_capacity_by_year(
+        sets=sets,
+        units=res_units,
+        nominal_capacity=res_nom_kw,
+        lifetime_years=p.res_lifetime_years,
+        degradation_rate=p.res_capacity_degradation_rate_per_year,
+    ) * res_inv_eta
+    model.add_constraints(
+        res_gen <= (resource_availability * res_cap_available),
+        name="res_generation_cap",
     )
 
-    # Helper: if a scenario row is all-NaN, treat as no-curve for that scenario
-    def _scenario_has_curve(scen: str) -> bool:
-        if not pl_points_ok:
-            return False
-        r = pl_rel.sel(scenario=scen)
-        e = pl_eff.sel(scenario=scen)
-        return (np.isfinite(r.values).any() and np.isfinite(e.values).any())
+    finite_res_max = np.isfinite(res_max_kw)
+    res_max_kw_finite = res_max_kw.where(finite_res_max, drop=True)
+    if res_max_kw_finite.sizes.get("resource", 0) > 0:
+        lhs_res_total = (res_units * res_nom_kw).sum("inv_step").sel(resource=res_max_kw_finite.resource)
+        model.add_constraints(lhs_res_total <= res_max_kw_finite, name="res_max_installable_capacity")
 
-    scenario_labels = [str(s) for s in sets.coords["scenario"].values.tolist()]
-    scenarios_with_pl = [s for s in scenario_labels if _scenario_has_curve(s)]
-    scenarios_without_pl = [s for s in scenario_labels if s not in scenarios_with_pl]
+    # ------------------------------------------------------------------
+    # 2) Generator capacity with year availability
+    # ------------------------------------------------------------------
+    gen_cap_available = _available_capacity_by_year(
+        sets=sets,
+        units=gen_units,
+        nominal_capacity=gen_nom_kw,
+        lifetime_years=p.generator_lifetime_years,
+        degradation_rate=p.generator_capacity_degradation_rate_per_year,
+    )
+    model.add_constraints(gen_gen <= gen_cap_available, name="generator_generation_cap")
 
-    # --- Case A) scenarios without PL curve: nominal efficiency equality
-    if len(scenarios_without_pl) > 0:
+    gen_max_vals = np.asarray(gen_max_kw.values, dtype=float)
+    if np.isfinite(gen_max_vals).any():
         model.add_constraints(
-            gen_gen.sel(scenario=scenarios_without_pl)
-            == fuel_cons.sel(scenario=scenarios_without_pl) * fuel_lhv.sel(scenario=scenarios_without_pl) * gen_eta_full,
+            (gen_units * gen_nom_kw).sum("inv_step") <= float(np.nanmax(gen_max_vals)),
+            name="generator_max_capacity",
+        )
+
+    # ------------------------------------------------------------------
+    # 3) Fuel-to-power relation
+    # ------------------------------------------------------------------
+    if p.generator_eff_curve_eff is not None and p.generator_eff_curve_rel_power is not None:
+        pl_rel = p.generator_eff_curve_rel_power
+        pl_eff = p.generator_eff_curve_eff
+        scenario_labels = [str(s) for s in sets.coords["scenario"].values.tolist()]
+
+        def _scenario_has_curve(scen: str) -> bool:
+            rel = pl_rel.sel(scenario=scen)
+            eff = pl_eff.sel(scenario=scen)
+            return bool(np.isfinite(rel.values).any() and np.isfinite(eff.values).any())
+
+        scenarios_with_pl = [s for s in scenario_labels if _scenario_has_curve(s)]
+        scenarios_without_pl = [s for s in scenario_labels if s not in scenarios_with_pl]
+
+        if len(scenarios_without_pl) > 0:
+            model.add_constraints(
+                gen_gen.sel(scenario=scenarios_without_pl)
+                == fuel_cons.sel(scenario=scenarios_without_pl) * fuel_lhv.sel(scenario=scenarios_without_pl) * gen_eta_full,
+                name="fuel_to_power_nominal_eta",
+            )
+
+        if len(scenarios_with_pl) > 0:
+            P = int(pl_rel.sizes["curve_point"])
+            seg = xr.IndexVariable("segment", np.arange(P - 1))
+
+            for s in scenarios_with_pl:
+                lhv_s = fuel_lhv.sel(scenario=s)
+                cap_sy = gen_cap_available.sel(scenario=s) if "scenario" in gen_cap_available.dims else gen_cap_available
+                r_full = pl_rel.sel(scenario=s)
+                e_full = pl_eff.sel(scenario=s)
+
+                if not (np.isfinite(r_full.values).all() and np.isfinite(e_full.values).all()):
+                    raise InputValidationError(
+                        f"Partial-load curve for scenario '{s}' contains NaNs; provide a full curve_point series."
+                    )
+                if np.any(np.diff(r_full.values) < 0.0):
+                    raise InputValidationError(
+                        f"Partial-load curve for scenario '{s}' must be sorted by increasing relative power output."
+                    )
+                positive_power_mask = np.asarray(r_full.values, dtype=float) > 0.0
+                if np.any(np.asarray(e_full.values, dtype=float)[positive_power_mask] <= 0.0):
+                    raise InputValidationError(
+                        f"Partial-load curve for scenario '{s}' contains non-positive efficiencies at positive output."
+                    )
+
+                r0 = r_full.isel(curve_point=seg)
+                r1 = r_full.isel(curve_point=seg + 1)
+                eta0 = e_full.isel(curve_point=seg)
+                eta1 = e_full.isel(curve_point=seg + 1)
+
+                rel0 = xr.DataArray(
+                    np.asarray(r0.values, dtype=float),
+                    coords={"segment": seg},
+                    dims=("segment",),
+                )
+                rel1 = xr.DataArray(
+                    np.asarray(r1.values, dtype=float),
+                    coords={"segment": seg},
+                    dims=("segment",),
+                )
+                eff0 = xr.DataArray(
+                    np.asarray(eta0.values, dtype=float),
+                    coords={"segment": seg},
+                    dims=("segment",),
+                )
+                eff1 = xr.DataArray(
+                    np.asarray(eta1.values, dtype=float),
+                    coords={"segment": seg},
+                    dims=("segment",),
+                )
+
+                lhv_value = float(lhv_s)
+                alpha0 = xr.where(np.isclose(rel0, 0.0), 0.0, rel0 / (eff0 * lhv_value))
+                alpha1 = xr.where(np.isclose(rel1, 0.0), 0.0, rel1 / (eff1 * lhv_value))
+
+                rel_span = rel1 - rel0
+                if np.any(np.isclose(rel_span.values.astype(float), 0.0)):
+                    raise InputValidationError(
+                        f"Partial-load curve for scenario '{s}' contains repeated relative-power points."
+                    )
+
+                slope = (alpha1 - alpha0) / rel_span
+                intercept = alpha0 - slope * rel0
+
+                gen_sy = gen_gen.sel(scenario=s).expand_dims(segment=seg)
+                fuel_sy = fuel_cons.sel(scenario=s).expand_dims(segment=seg)
+                cap_seg = cap_sy.expand_dims(segment=seg)
+                rhs = slope * gen_sy + intercept * cap_seg
+
+                model.add_constraints(
+                    fuel_sy >= rhs,
+                    name=f"fuel_to_power_partial_load_{s}",
+                )
+    else:
+        model.add_constraints(
+            gen_gen == fuel_cons * fuel_lhv * gen_eta_full,
             name="fuel_to_power_nominal_eta",
         )
 
-    # --- Case B) scenarios with PL curve: convex piecewise lower bound
-    if pl_points_ok and len(scenarios_with_pl) > 0:
-        # segment coordinate: 0..P-2
-        P = int(pl_rel.sizes["curve_point"])
-        seg = xr.IndexVariable("segment", np.arange(P - 1))
+    # ------------------------------------------------------------------
+    # 4) Battery limits and SOC dynamics
+    # ------------------------------------------------------------------
+    bat_cap_available = _available_capacity_by_year(
+        sets=sets,
+        units=bat_units,
+        nominal_capacity=bat_nom_kwh,
+        lifetime_years=p.battery_calendar_lifetime_years,
+        degradation_rate=p.battery_capacity_degradation_rate_per_year,
+    )
 
-        for s in scenarios_with_pl:
-            # Scalar per scenario
-            lhv_s = fuel_lhv.sel(scenario=s)  # scalar DA
-            cap = gen_nom_kw                  # scalar DA (kW per unit)
+    model.add_constraints(bat_ch <= (bat_cap_available / t_ch), name="battery_charge_limit")
+    model.add_constraints(bat_dis <= (bat_cap_available / t_dis), name="battery_discharge_limit")
 
-            # Breakpoints for this scenario
-            r_full = pl_rel.sel(scenario=s)   # (curve_point,)
-            e_full = pl_eff.sel(scenario=s)   # (curve_point,)
-
-            # Basic sanity (optional but recommended)
-            # - drop NaNs (if present) by requiring all finite
-            if not (np.isfinite(r_full.values).all() and np.isfinite(e_full.values).all()):
-                raise ValueError(f"Partial-load curve for scenario '{s}' contains NaNs; provide full curve_point series.")
-
-            # r0,r1 and eta0,eta1
-            r0 = r_full.isel(curve_point=seg)         # (segment,)
-            r1 = r_full.isel(curve_point=seg + 1)     # (segment,)
-            eta0 = e_full.isel(curve_point=seg)       # (segment,)
-            eta1 = e_full.isel(curve_point=seg + 1)   # (segment,)
-
-            # Convert to power at breakpoints for ONE unit (kW)
-            p0 = cap * r0                              # (segment,)
-            p1 = cap * r1                              # (segment,)
-
-            # Fuel at breakpoints for ONE unit (unit_fuel/h since Δt=1h)
-            # fc = P / (eta * LHV)
-            fc0 = p0 / (eta0 * lhv_s)                  # (segment,)
-            fc1 = p1 / (eta1 * lhv_s)                  # (segment,)
-
-            # Segment slope in fuel per kWh (unit_fuel/kWh)
-            denom = (p1 - p0)
-            slope = xr.where(denom != 0.0, (fc1 - fc0) / denom, 0.0)  # (segment,)
-
-            # Variables for this scenario
-            gen_ts = gen_gen.sel(scenario=s)           # (period,)
-            fuel_ts = fuel_cons.sel(scenario=s)        # (period,)
-
-            # Broadcast to (period, segment)
-            gen_b = gen_ts.expand_dims({"segment": seg})
-            fuel_b = fuel_ts.expand_dims({"segment": seg})
-
-            # RHS: slope*(gen - p0*units) + fc0*units
-            rhs = slope * (gen_b - p0 * gen_units) + fc0 * gen_units
-
-            model.add_constraints(
-                fuel_b >= rhs,
-                name=f"fuel_to_power_partial_load_{s}",
-            )
-
-
-    # ---------------------------------------------------------------------
-    # 5) Battery charge/discharge power limits
-    #
-    # battery_charge(t,s)    <= (battery_units * bat_nom_kwh) / t_ch
-    # battery_discharge(t,s) <= (battery_units * bat_nom_kwh) / t_dis
-    # ---------------------------------------------------------------------
-    model.add_constraints(bat_ch <= (bat_units * bat_nom_kwh) / t_ch, name="battery_charge_limit")
-    model.add_constraints(bat_dis <= (bat_units * bat_nom_kwh) / t_dis, name="battery_discharge_limit")
-
-    # ---------------------------------------------------------------------
-    # 6) Battery SOC dynamics (hourly Δt=1h) with cyclic end condition
-    #
-    # soc[0,s] = soc0(s)*Ecap   (initial condition)
-    # soc[t,s] = soc[t-1,s] + eta_c(s)*bat_ch[t-1,s] - (1/eta_d(s))*bat_dis
-    # soc[T-1,s] = soc0(s)*Ecap  (cyclic condition: end returns to initial)
-    # where Ecap = battery_units * bat_nom_kwh
-    # ---------------------------------------------------------------------
     T = int(period.size)
-    Ecap = bat_units * bat_nom_kwh
-
-    model.add_constraints(soc.isel(period=0) == soc0 * Ecap, name="soc_initial")
+    model.add_constraints(soc.isel(period=0) == soc0 * bat_cap_available, name="soc_initial")
 
     if T > 1:
         model.add_constraints(
@@ -396,116 +337,85 @@ def initialize_constraints(
             name="soc_balance",
         )
 
-    # cyclic closure (do NOT also force soc[T-1]==soc0*Ecap)
     model.add_constraints(
-        soc.isel(period=T-1)
-        + eta_c * bat_ch.isel(period=T-1)
-        - bat_dis.isel(period=T-1) / eta_d
-        == soc0 * Ecap,
+        soc.isel(period=T - 1)
+        + eta_c * bat_ch.isel(period=T - 1)
+        - bat_dis.isel(period=T - 1) / eta_d
+        == soc0 * bat_cap_available,
         name="soc_cyclic",
     )
+    model.add_constraints(soc <= bat_cap_available, name="soc_upper")
+    model.add_constraints(soc >= (1.0 - dod) * bat_cap_available, name="soc_lower")
 
-    model.add_constraints(soc <= Ecap, name="soc_upper")
-    model.add_constraints(soc >= (1.0 - dod) * Ecap, name="soc_lower")
-
-    # ---------------------------------------------------------------------
-    # 7) Grid import/export limits (if enabled)
-    # Constraints:
-    #   grid_import(t,s) <= grid_availability(t,s) * line_cap_kw(s)
-    #   grid_export(t,s) <= grid_availability(t,s) * line_cap_kw(s)
-    # ---------------------------------------------------------------------
-    if on_grid:
-        # Import limited by availability and line capacity and efficiency
-        rhs_imp = grid_avail * line_cap_kw
-        model.add_constraints(grid_imp <= rhs_imp, name="grid_import_cap")
-
-        if allow_export:
-            rhs_exp = grid_avail * line_cap_kw
-            model.add_constraints(grid_exp <= rhs_exp, name="grid_export_cap")
-
-    # ---------------------------------------------------------------------
-    # 8) Energy balance per (period, scenario)
-    # Energy balance:
-    #   Σ_r res_generation(t,s,r)
-    # + generator_generation(t,s)
-    # + grid_import(t,s) [if on_grid]
-    # - grid_export(t,s) [if allow_export]
-    # + battery_discharge(t,s)
-    # - battery_charge(t,s)
-    # + lost_load(t,s)
-    # == load_demand(t,s)
-    # ---------------------------------------------------------------------
-    res_sum = res_gen.sum("resource")  # (period, scenario)
-
-    if on_grid and allow_export:
+    # ------------------------------------------------------------------
+    # 5) Grid limits and nodal balance
+    # ------------------------------------------------------------------
+    if on_grid and grid_imp is not None:
         model.add_constraints(
-            res_sum + gen_gen + ((grid_imp * grid_eta) - (grid_exp * grid_eta)) + (bat_dis - bat_ch) + ll == load_demand,
-            name="energy_balance",
+            grid_imp <= (grid_availability * grid_line_cap),
+            name="grid_import_cap",
         )
-    elif on_grid and not allow_export:
-        model.add_constraints(
-            res_sum + gen_gen + (grid_imp * grid_eta) + (bat_dis - bat_ch) + ll == load_demand,
-            name="energy_balance",
-        )
+        if allow_export and grid_exp is not None:
+            model.add_constraints(
+                grid_exp <= (grid_availability * grid_line_cap),
+                name="grid_export_cap",
+            )
+
+    res_sum = res_gen.sum("resource")
+    lhs = res_sum + gen_gen + (bat_dis - bat_ch) + ll
+
+    if on_grid and grid_imp is not None:
+        lhs = lhs + (grid_imp * grid_eta)
+        if allow_export and grid_exp is not None:
+            lhs = lhs - (grid_exp * grid_eta)
+
+    model.add_constraints(lhs == load_demand, name="energy_balance")
+
+    # ------------------------------------------------------------------
+    # 6) Policy constraints (year/scenario or expected-by-year)
+    # ------------------------------------------------------------------
+    e_demand = load_demand.sum("period")  # (year, scenario)
+    e_ll = ll.sum("period")  # (year, scenario)
+    e_res = res_sum.sum("period")  # (year, scenario)
+    e_gen = gen_gen.sum("period")  # (year, scenario)
+
+    if on_grid and grid_imp is not None:
+        e_grid = (grid_imp * grid_eta).sum("period")
+        e_grid_ren = (grid_imp * grid_eta * grid_ren_share).sum("period")
     else:
-        model.add_constraints(
-            res_sum + gen_gen + (bat_dis - bat_ch) + ll == load_demand,
-            name="energy_balance",
-        )
+        # e_res is a linopy expression, not an xarray object; keep zero as scalar.
+        e_grid = 0.0
+        e_grid_ren = 0.0
 
-    # ---------------------------------------------------------------------
-    # 9) System-level constraints: min renewable penetration & max lost load
-    #
-    # Enforcement modes:
-    #  - scenario_wise: constraints hold for each scenario separately
-    #  - expected: constraints hold on scenario-weighted totals
-    # ---------------------------------------------------------------------
-
-    # Total demand energy per scenario
-    E_demand_s = load_demand.sum("period")  # (scenario,)
-    E_ll_s     = ll.sum("period")          # (scenario,)
-    E_res_s    = res_sum.sum("period")     # (scenario,)
-    E_gen_s    = gen_gen.sum("period")     # (scenario,)
-
-    if on_grid:
-        E_grid_s = grid_imp.sum("period")  # (scenario,)
-    else:
-        E_grid_s = xr.DataArray(
-            np.zeros((int(scenario.size),), dtype=float),
-            coords={"scenario": scenario},
-            dims=("scenario",),
-        )
-
-    # --- (A) Max lost-load share
-    #     sum_t lost_load(t,s) <= max_ll_frac(s) * sum_t load(t,s)
     if enforcement == "scenario_wise":
-        model.add_constraints(E_ll_s <= max_ll_frac * E_demand_s, name="max_lost_load_share")
+        model.add_constraints(e_ll <= (max_ll_frac * e_demand), name="max_lost_load_share")
     else:
-        # expected: Σ_s w_s * LL_s <= max_ll_frac * Σ_s w_s * Demand_s
-        E_ll_exp     = (E_ll_s * w_s).sum("scenario")       # scalar
-        E_demand_exp = (E_demand_s * w_s).sum("scenario")   # scalar
-        model.add_constraints(E_ll_exp <= max_ll_frac * E_demand_exp, name="max_lost_load_share_expected")
-
-    # --- (B) Minimum renewable penetration
-    #   E_total = E_res + E_gen + E_grid_import
-    #   E_renew = E_res
-    # Only add if min_res_pen > 0.0
-    if min_res_pen > 0.0:
-        if enforcement == "scenario_wise":
-            E_total_s = E_res_s + E_gen_s + E_grid_s
-            model.add_constraints(E_res_s >= min_res_pen * E_total_s, name="min_renewable_penetration")
+        lhs_ll = (e_ll * scenario_weight).sum("scenario")
+        if "scenario" in max_ll_frac.dims:
+            rhs_ll = (max_ll_frac * e_demand * scenario_weight).sum("scenario")
         else:
-            E_total_exp = ((E_res_s + E_gen_s + E_grid_s) * w_s).sum("scenario")  # scalar
-            E_res_exp   = (E_res_s * w_s).sum("scenario")                         # scalar
-            model.add_constraints(E_res_exp >= min_res_pen * E_total_exp, name="min_renewable_penetration_expected")
+            rhs_ll = max_ll_frac * (e_demand * scenario_weight).sum("scenario")
+        model.add_constraints(lhs_ll <= rhs_ll, name="max_lost_load_share_expected")
 
-    # ---------------------------------------------------------------------
-    # 10) Land availability (renewables only)
-    #
-    # area_used = Σ_r (res_units(r) * res_nominal_kw(r) * res_area_m2_per_kw(r))
-    # ---------------------------------------------------------------------
-    area_used = (res_units * res_nom_kw * res_area_m2_per_kw).sum("resource") # scalar
-    model.add_constraints(area_used <= land_m2, name="land_availability") 
+    if _is_effectively_positive(min_res_pen):
+        e_total = e_res + e_gen + e_grid
+        e_renew = e_res + e_grid_ren
+        if enforcement == "scenario_wise":
+            model.add_constraints(e_renew >= (min_res_pen * e_total), name="min_renewable_penetration")
+        else:
+            lhs_res = (e_renew * scenario_weight).sum("scenario")
+            if "scenario" in min_res_pen.dims:
+                rhs_res = (min_res_pen * e_total * scenario_weight).sum("scenario")
+            else:
+                rhs_res = min_res_pen * (e_total * scenario_weight).sum("scenario")
+            model.add_constraints(lhs_res >= rhs_res, name="min_renewable_penetration_expected")
 
-
-
+    # ------------------------------------------------------------------
+    # 7) Land use (design-side, scenario-independent investments)
+    # ------------------------------------------------------------------
+    area_used = res_units * res_nom_kw * res_area_m2_per_kw
+    if "inv_step" in area_used.dims:
+        area_used = area_used.sum("inv_step")
+    if "resource" in area_used.dims:
+        area_used = area_used.sum("resource")
+    model.add_constraints(area_used <= land_m2, name="land_availability")

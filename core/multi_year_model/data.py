@@ -1,15 +1,24 @@
 # generation_planning/modeling/data.py
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
-from typing import Any, Dict, Sequence, Optional, List, Tuple
+from typing import Any, Dict, Optional, List, Tuple
 
-import json
 import numpy as np
 import pandas as pd
 import xarray as xr
-import yaml
 
+from core.data_pipeline.utils import (
+    as_float,
+    as_float_or_nan,
+    as_str,
+    broadcast_to_scenario,
+    normalize_weights,
+    read_json_or_raise,
+    read_yaml_or_raise,
+)
+from core.data_pipeline.loader import load_project_dataset
 from core.io.utils import project_paths, simulate_grid_availability_dynamic
 
 
@@ -20,75 +29,13 @@ class InputValidationError(RuntimeError):
 # -----------------------------------------------------------------------------
 # helpers
 # -----------------------------------------------------------------------------
-def _read_json(path: Path) -> Dict[str, Any]:
-    """Read and parse JSON file, raising InputValidationError on failure."""
-    if not path.exists():
-        raise InputValidationError(f"Missing required file: {path}")
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception as e:
-        raise InputValidationError(f"Cannot parse JSON: {path}\nerror: {e}")
-    
-def _read_yaml(path: Path) -> Dict[str, Any]:
-    """Read and parse YAML file, raising InputValidationError on failure."""
-    if not path.exists():
-        raise InputValidationError(f"Missing required file: {path}")
-    try:
-        with path.open("r", encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
-    except Exception as e:
-        raise InputValidationError(f"Cannot parse YAML: {path}\nerror: {e}")
-
-def _as_float(x: Any, *, name: str, default: float = 0.0) -> float:
-    """Convert x to float, with default if None. Raise InputValidationError on failure."""
-    if x is None:
-        return float(default)
-    try:
-        return float(x)
-    except Exception as e:
-        raise InputValidationError(f"Invalid value for '{name}': {x!r} (error: {e})")
-    
-def _as_float_or_nan(x: Any, *, name: str) -> float:
-    """Convert x to float, or NaN if None. Raise InputValidationError on failure."""
-    if x is None:
-        return float("nan")
-    try:
-        return float(x)
-    except Exception as e:
-        raise InputValidationError(f"Invalid numeric value for '{name}': {x!r} (error: {e})")
-
-
-def _as_str(x: Any, *, name: str, default: str = "") -> str:
-    """Convert x to str, with default if None. Raise InputValidationError on failure."""
-    if x is None:
-        return default
-    try:
-        return str(x)
-    except Exception as e:
-        raise InputValidationError(f"Invalid value for '{name}': {x!r} (error: {e})")
-
-def _normalize_weights(weights: Sequence[float], n: int) -> list[float]:
-    """Normalize a list of weights to sum to 1.0 over n items."""
-    if n <= 0:
-        return [1.0]
-    w = [float(x) for x in (weights or [])]
-    if len(w) != n:
-        w = [1.0 / n] * n
-    s = float(sum(w))
-    if s <= 0:
-        return [1.0 / n] * n
-    return [wi / s for wi in w]
-
-def _broadcast_to_scenario(value: xr.DataArray, scenario_coord: xr.DataArray) -> xr.DataArray:
-    """Broadcast a scalar DataArray to scenario dimension."""
-    if value.ndim != 0:
-        return value
-    return xr.DataArray(
-        np.full((scenario_coord.size,), float(value.values)),
-        coords={"scenario": scenario_coord},
-        dims=("scenario",),
-        name=value.name,
-        attrs=dict(value.attrs or {}))
+_read_json = partial(read_json_or_raise, error_cls=InputValidationError)
+_read_yaml = partial(read_yaml_or_raise, error_cls=InputValidationError)
+_as_float = partial(as_float, error_cls=InputValidationError)
+_as_float_or_nan = partial(as_float_or_nan, error_cls=InputValidationError)
+_as_str = partial(as_str, error_cls=InputValidationError)
+_normalize_weights = normalize_weights
+_broadcast_to_scenario = broadcast_to_scenario
 
 def _normalize_step_key(k: object) -> str:
     """
@@ -98,12 +45,15 @@ def _normalize_step_key(k: object) -> str:
       - "1", "2"
       - 1, 2
       - "step_1", "step_2"
+      - "base" (alias/default block)
       - "Step 1" (best effort)
     Returns:
       - "1" or "2" ... (string)
     """
     s = str(k).strip()
     s_low = s.lower().replace(" ", "")
+    if s_low == "base":
+        return "base"
     if s_low.startswith("step_"):
         return s_low.split("step_", 1)[1]
     if s_low.startswith("step"):
@@ -114,7 +64,15 @@ def _normalize_step_key(k: object) -> str:
 
 def _remap_by_step_dict(path: Path, by_step: dict, *, expected_steps: List[str], context: str) -> Dict[str, dict]:
     """
-    Remap a YAML by_step mapping that may be keyed by 'step_1' to expected step labels like '1'.
+    Remap a YAML by_step mapping that may be keyed by:
+      - step labels ('1', '2', ...)
+      - aliases ('step_1', 'step_2', ...)
+      - 'base' (default block)
+
+    Behavior for 'base':
+      - if only one step is expected, 'base' maps to that step
+      - if multiple steps are expected, 'base' is broadcast as default for any missing step
+
     Raises a clear error if after remapping required steps are still missing.
     """
     if not isinstance(by_step, dict):
@@ -125,6 +83,13 @@ def _remap_by_step_dict(path: Path, by_step: dict, *, expected_steps: List[str],
     for k, v in by_step.items():
         nk = _normalize_step_key(k)
         remapped[str(nk)] = v
+
+    # Support human-friendly single/default block in templates:
+    # by_step: {base: {...}}
+    if "base" in remapped:
+        base_block = remapped["base"]
+        for st in expected_steps:
+            remapped.setdefault(st, base_block)
 
     missing = [st for st in expected_steps if st not in remapped]
     if missing:
@@ -451,13 +416,13 @@ def _load_renewables_yaml(
         "specific_investment_cost_per_kw",
         "wacc",
         "grant_share_of_capex",
-        "specific_area_m2_per_kw",
         "embedded_emissions_kgco2e_per_kw",   # embodied per kW installed (investment-side)
     ]
 
     # technical, step-invariant (single technology physics)
     PARAMS_TECHNICAL_INVARIANT = [
         "inverter_efficiency",
+        "specific_area_m2_per_kw",            # physical land-use coefficient (resource-level)
         "max_installable_capacity_kw",        # allow None -> NaN
     ]
 
@@ -512,6 +477,7 @@ def _load_renewables_yaml(
             context=f"resource '{res_label}' investment.by_step",
         )
 
+        legacy_specific_area_by_step: Dict[str, float] = {}
         for st in step_labels:
             blk = inv_by_step[st]
             if not isinstance(blk, dict):
@@ -519,6 +485,12 @@ def _load_renewables_yaml(
                     f"{path.name}: resource '{res_label}' investment.by_step['{st}'] must be a mapping/dict."
                 )
             si = step_to_idx[st]
+            if "specific_area_m2_per_kw" in blk:
+                legacy_specific_area_by_step[st] = _as_float(
+                    blk.get("specific_area_m2_per_kw"),
+                    name=f"{res_label}/investment/{st}/specific_area_m2_per_kw",
+                    default=0.0,
+                )
             for k in PARAMS_INVESTMENT_BY_STEP:
                 if k not in blk:
                     raise InputValidationError(
@@ -535,11 +507,30 @@ def _load_renewables_yaml(
             raise InputValidationError(f"{path.name}: resource '{res_label}' missing/invalid 'technical' mapping.")
 
         for k in PARAMS_TECHNICAL_INVARIANT:
-            if k not in tech_block:
-                raise InputValidationError(
-                    f"{path.name}: missing technical param '{k}' in resource '{res_label}' (technical.{k})."
-                )
-            tech_arr[k][j] = _as_float(tech_block.get(k), name=f"{res_label}/technical/{k}", default=0.0)
+            if k in tech_block:
+                if k == "max_installable_capacity_kw":
+                    tech_arr[k][j] = _as_float_or_nan(tech_block.get(k), name=f"{res_label}/technical/{k}")
+                else:
+                    tech_arr[k][j] = _as_float(tech_block.get(k), name=f"{res_label}/technical/{k}", default=0.0)
+                continue
+
+            # Backward compatibility:
+            # allow specific_area_m2_per_kw under investment.by_step, but store as resource-level technical param.
+            if k == "specific_area_m2_per_kw" and len(legacy_specific_area_by_step) > 0:
+                vals = list(legacy_specific_area_by_step.values())
+                v0 = vals[0]
+                if not all(np.isclose(v, v0, rtol=0.0, atol=1e-12) for v in vals):
+                    raise InputValidationError(
+                        f"{path.name}: resource '{res_label}' has step-varying specific_area_m2_per_kw in investment.by_step. "
+                        "This parameter must be step-invariant; move it to technical.specific_area_m2_per_kw "
+                        "or use the same value across all steps."
+                    )
+                tech_arr[k][j] = v0
+                continue
+
+            raise InputValidationError(
+                f"{path.name}: missing technical param '{k}' in resource '{res_label}' (technical.{k})."
+            )
 
         # ---- operation.by_scenario (NOT step-dependent)
         op_block = item.get("operation", None)
@@ -714,12 +705,18 @@ def _load_battery_yaml(
         blk = inv_by_step[st]
         if not isinstance(blk, dict):
             raise InputValidationError(f"{path.name}: battery.investment.by_step['{st}'] must be a dict.")
+        si = step_to_idx[st]
 
         for k in INVESTMENT_BY_STEP:
             if k not in blk:
                 raise InputValidationError(
                     f"{path.name}: missing investment param '{k}' in battery.investment.by_step['{st}']."
                 )
+            # Persist parsed investment values into (inv_step,) arrays.
+            if k in ("max_installable_capacity_kwh",):
+                inv_arr[k][si] = _as_float_or_nan(blk.get(k), name=f"battery/investment/{st}/{k}")
+            else:
+                inv_arr[k][si] = _as_float(blk.get(k), name=f"battery/investment/{st}/{k}", default=0.0)
 
     # -----------------------------
     # 2) Technical block: battery.technical (step-invariant)
@@ -946,7 +943,10 @@ def _load_generator_and_fuel_yaml(
     for k in GEN_TECHNICAL:
         if k not in tech_block:
             raise InputValidationError(f"{path.name}: missing generator technical param '{k}' in generator.technical.")
-        tech_vals[k] = _as_float(tech_block.get(k), name=f"generator/technical/{k}", default=0.0)
+        if k == "max_installable_capacity_kw":
+            tech_vals[k] = _as_float_or_nan(tech_block.get(k), name=f"generator/technical/{k}")
+        else:
+            tech_vals[k] = _as_float(tech_block.get(k), name=f"generator/technical/{k}", default=0.0)
 
     # ---- operation.by_scenario (scenario-dependent, no steps)
     op_block = gen.get("operation", None)
@@ -1360,11 +1360,13 @@ def _load_grid_yaml_dynamic(
     PARAMS = [
         ("line", "capacity_kw", "grid_line_capacity_kw"),
         ("line", "transmission_efficiency", "grid_transmission_efficiency"),
+        ("line", "renewable_share", "grid_renewable_share"),
 
         ("outages", "average_outages_per_year", "grid_avg_outages_per_year"),
         ("outages", "average_outage_duration_minutes", "grid_avg_outage_duration_minutes"),
         ("outages", "outage_scale_od_hours", "grid_outage_scale_od_hours"),
         ("outages", "outage_shape_od", "grid_outage_shape_od"),
+        ("outages", "outage_seed", "grid_outage_seed"),
     ]
 
     arr = {out: np.full((len(scenario_labels),), np.nan, dtype=float) for _, _, out in PARAMS}
@@ -1425,16 +1427,22 @@ def _load_grid_yaml_dynamic(
             default = 0.0
             if out == "grid_transmission_efficiency":
                 default = 1.0
+            elif out == "grid_renewable_share":
+                default = 0.0
             elif out == "grid_outage_scale_od_hours":
                 default = 36 / 60  # 0.6h default
             elif out == "grid_outage_shape_od":
                 default = 0.56
+            elif out == "grid_outage_seed":
+                default = 0.0
 
             arr[out][i] = _as_float(sec.get(key), name=f"grid/{s_lab}/{section}/{key}", default=default)
 
     # ---- validity checks ----
     if np.any(arr["grid_transmission_efficiency"] < 0.0) or np.any(arr["grid_transmission_efficiency"] > 1.0):
         raise InputValidationError(f"{path.name}: line.transmission_efficiency must be in [0,1].")
+    if np.any(arr["grid_renewable_share"] < 0.0) or np.any(arr["grid_renewable_share"] > 1.0):
+        raise InputValidationError(f"{path.name}: line.renewable_share must be in [0,1].")
     if np.any(arr["grid_outage_scale_od_hours"] <= 0.0):
         raise InputValidationError(f"{path.name}: outages.outage_scale_od_hours must be > 0.")
     if np.any(arr["grid_outage_shape_od"] <= 0.0):
@@ -1471,28 +1479,123 @@ def _load_grid_yaml_dynamic(
     ds.attrs["settings"] = {"inputs_loaded": {"grid_yaml": str(path)}, "formulation": "dynamic"}
     return ds
 
+
+def _write_grid_availability_csv_dynamic(path: Path, *, availability: xr.DataArray) -> None:
+    if set(availability.dims) != {"period", "scenario", "year"}:
+        raise InputValidationError("grid_availability must have dims ('period','scenario','year').")
+
+    period = availability.coords["period"].values.astype(int)
+    scenario_labels = [str(v) for v in availability.coords["scenario"].values.tolist()]
+    year_values = availability.coords["year"].values.tolist()
+    year_labels = [str(v) for v in year_values]
+
+    cols = [("meta", "hour")] + [(scenario, year) for scenario in scenario_labels for year in year_labels]
+    df = pd.DataFrame(columns=pd.MultiIndex.from_tuples(cols))
+    df[("meta", "hour")] = period
+
+    for scenario in scenario_labels:
+        for year_value, year_label in zip(year_values, year_labels):
+            df[(scenario, year_label)] = availability.sel(scenario=scenario, year=year_value).values.astype(float)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(path, index=False)
+
+
+def _first_connection_year_to_ordinal(first_year_value: Any, year_values: list[Any]) -> int | None:
+    try:
+        if first_year_value is None or np.isnan(float(first_year_value)):
+            return None
+    except Exception:
+        pass
+
+    if not year_values:
+        return None
+
+    year_labels = [str(v) for v in year_values]
+    fy_str = str(first_year_value)
+    if fy_str in year_labels:
+        return year_labels.index(fy_str) + 1
+
+    try:
+        fy_int = int(first_year_value)
+        year_ints = [int(v) for v in year_values]
+        if fy_int <= year_ints[0]:
+            return 1
+        for idx, year_int in enumerate(year_ints, start=1):
+            if fy_int == year_int:
+                return idx
+        if fy_int > year_ints[-1]:
+            return int(len(year_values) + 1)
+    except Exception:
+        pass
+
+    return None
+
+
+def regenerate_grid_availability_dynamic(*, project_name: str, sets: xr.Dataset) -> xr.DataArray:
+    paths = project_paths(project_name)
+    scenario_coord = sets.coords["scenario"]
+    year_coord = sets.coords["year"]
+    period_coord = sets.coords["period"]
+
+    grid_ds = _load_grid_yaml_dynamic(
+        paths.inputs_dir / "grid.yaml",
+        scenario_coord=scenario_coord,
+        year_coord=year_coord,
+    )
+
+    n_p = int(period_coord.size)
+    n_s = int(scenario_coord.size)
+    n_y = int(year_coord.size)
+    avail = np.zeros((n_p, n_s, n_y), dtype=float)
+
+    scenario_labels = [str(s) for s in scenario_coord.values.tolist()]
+    year_values = year_coord.values.tolist()
+    year_labels = [str(y) for y in year_values]
+
+    for j, s_lab in enumerate(scenario_labels):
+        ao = float(grid_ds["grid_avg_outages_per_year"].sel(scenario=s_lab).values)
+        ad = float(grid_ds["grid_avg_outage_duration_minutes"].sel(scenario=s_lab).values)
+        scale_od = float(grid_ds["grid_outage_scale_od_hours"].sel(scenario=s_lab).values)
+        shape_od = float(grid_ds["grid_outage_shape_od"].sel(scenario=s_lab).values)
+        seed = int(float(grid_ds["grid_outage_seed"].sel(scenario=s_lab).values))
+        fy = grid_ds["grid_first_year_connection"].sel(scenario=s_lab).values
+        connection_ordinal = _first_connection_year_to_ordinal(fy, year_values)
+
+        avail_ty = simulate_grid_availability_dynamic(
+            ao,
+            ad,
+            years=int(year_coord.size),
+            periods_per_year=int(period_coord.size),
+            first_year_connection=connection_ordinal,
+            scale_od=scale_od,
+            shape_od=shape_od,
+            rng=np.random.default_rng(seed),
+        )
+
+        for k, y_lab in enumerate(year_labels):
+            connected = True
+            if connection_ordinal is not None:
+                connected = (k + 1) >= int(connection_ordinal)
+            avail[:, j, k] = avail_ty[:, k] if connected else 0.0
+
+    grid_availability = xr.DataArray(
+        avail,
+        coords={"period": period_coord, "scenario": scenario_coord, "year": year_coord},
+        dims=("period", "scenario", "year"),
+        name="grid_availability",
+        attrs={"units": "binary", "component": "grid", "dynamic_only": True},
+    )
+
+    _write_grid_availability_csv_dynamic(paths.inputs_dir / "grid_availability.csv", availability=grid_availability)
+    return grid_availability
+
 # -----------------------------------------------------------------------------
 # main entrypoint (DYNAMIC)
 # -----------------------------------------------------------------------------
-def initialize_data(project_name: str, sets: xr.Dataset) -> xr.Dataset:
+def _initialize_data_legacy(project_name: str, sets: xr.Dataset) -> xr.Dataset:
     """
-    Initialize model data (parameters) for the dynamic multi-year formulation.
-
-    Expected sets:
-      - period (8760 hours, 0..8759)
-      - scenario
-      - year
-      - inv_step
-      - resource
-      (and ideally: year_inv_step + inv_active_in_year already stored in sets)
-
-    Loads:
-      - scenario weights
-      - optimization constraints
-      - load demand time series: (period, scenario, year)
-      - resource availability: (period, scenario, year, resource)
-      - renewables.yaml, battery.yaml, generator.yaml (+ optional eff curve)
-      - on-grid: grid.yaml + price CSVs + grid availability (period, scenario, year)
+    Legacy dynamic loader implementation kept for shared pipeline delegation.
     """
     if not isinstance(sets, xr.Dataset):
         raise InputValidationError("initialize_data_dynamic expects `sets` as an xarray.Dataset.")
@@ -1508,7 +1611,6 @@ def initialize_data(project_name: str, sets: xr.Dataset) -> xr.Dataset:
 
     n_scen = int(scenario_coord.size)
 
-    # --- read formulation.json
     paths = project_paths(project_name)
     formulation = _read_json(paths.formulation_json)
 
@@ -1516,11 +1618,9 @@ def initialize_data(project_name: str, sets: xr.Dataset) -> xr.Dataset:
     if formulation_mode != "dynamic":
         raise InputValidationError("This data initializer is for dynamic only.")
 
-    # unit commitment flag
     uc_enabled = bool(formulation.get("unit_commitment", False))
     capexp_enabled = bool(formulation.get("capacity_expansion", False))
 
-    # --- multi-scenario weights
     ms = formulation.get("multi_scenario", {}) or {}
     ms_enabled = bool(ms.get("enabled", False))
 
@@ -1537,12 +1637,9 @@ def initialize_data(project_name: str, sets: xr.Dataset) -> xr.Dataset:
         name="scenario_weight",
     )
 
-    # --- optimization constraints
     optc = formulation.get("optimization_constraints", {}) or {}
-
     enforcement = _as_str(optc.get("enforcement", None), name="optimization_constraints.enforcement")
     if not enforcement:
-        # keep your default logic; dynamic still supports expected/scenario-wise
         enforcement = "expected" if ms_enabled else "scenario_wise"
     if enforcement not in ("expected", "scenario_wise"):
         raise InputValidationError(
@@ -1559,25 +1656,19 @@ def initialize_data(project_name: str, sets: xr.Dataset) -> xr.Dataset:
     da_min_res_pen = xr.DataArray(min_res_pen, name="min_renewable_penetration")
     da_max_ll_frac = xr.DataArray(max_ll_frac, name="max_lost_load_fraction")
     da_land = xr.DataArray(land_m2, name="land_availability_m2")
-
-    # In your objective, lolc/em_cost can be scalar or (scenario,). Keep same pattern:
     da_lolc = xr.DataArray(lolc, name="lost_load_cost_per_kwh")
     da_em_cost = xr.DataArray(em_cost, name="emission_cost_per_kgco2e")
     if enforcement == "scenario_wise":
         da_lolc = _broadcast_to_scenario(da_lolc, scenario_coord)
         da_em_cost = _broadcast_to_scenario(da_em_cost, scenario_coord)
 
-    # ------------------------------------------------------------------
-    # TIME SERIES (dynamic): load_demand + resource_availability
-    # ------------------------------------------------------------------
     load_path = paths.inputs_dir / "load_demand.csv"
     load_demand = _load_load_demand_csv(
         load_path,
         period_coord=period_coord,
         scenario_coord=scenario_coord,
         year_coord=year_coord,
-    )  # (period, scenario, year)
-
+    )
     resource_path = paths.inputs_dir / "resource_availability.csv"
     resource_avail = _load_resource_availability_csv(
         resource_path,
@@ -1585,9 +1676,8 @@ def initialize_data(project_name: str, sets: xr.Dataset) -> xr.Dataset:
         scenario_coord=scenario_coord,
         year_coord=year_coord,
         resource_coord=resource_coord,
-    )  # (period, scenario, year, resource)
+    )
 
-    # Base dataset
     data = xr.Dataset(
         data_vars={
             "scenario_weight": scenario_weights,
@@ -1601,9 +1691,6 @@ def initialize_data(project_name: str, sets: xr.Dataset) -> xr.Dataset:
         }
     )
 
-    # ------------------------------------------------------------------
-    # TECHNO-ECON (dynamic): renewables / battery / generator(+fuel)
-    # ------------------------------------------------------------------
     renewables_path = paths.inputs_dir / "renewables.yaml"
     ren_params_ds = _load_renewables_yaml(
         renewables_path,
@@ -1611,20 +1698,18 @@ def initialize_data(project_name: str, sets: xr.Dataset) -> xr.Dataset:
         resource_coord=resource_coord,
         inv_step_coord=inv_step_coord,
     )
-
     battery_path = paths.inputs_dir / "battery.yaml"
     bat_params_ds = _load_battery_yaml(
         battery_path,
         scenario_coord=scenario_coord,
         inv_step_coord=inv_step_coord,
     )
-
     genfuel_path = paths.inputs_dir / "generator.yaml"
     gen_ds, fuel_ds, curve_ds, genfuel_meta = _load_generator_and_fuel_yaml(
         genfuel_path,
         inputs_dir=paths.inputs_dir,
         scenario_coord=scenario_coord,
-        year_coord=year_coord,          # <-- for fuel by-year costs
+        year_coord=year_coord,
         inv_step_coord=inv_step_coord,
     )
 
@@ -1632,9 +1717,6 @@ def initialize_data(project_name: str, sets: xr.Dataset) -> xr.Dataset:
     if curve_ds is not None:
         data = xr.merge([data, curve_ds], compat="override")
 
-    # ------------------------------------------------------------------
-    # GRID (dynamic): grid.yaml + price CSVs + availability(period,scenario,year)
-    # ------------------------------------------------------------------
     on_grid = bool(formulation.get("on_grid", False))
     allow_export = bool(formulation.get("grid_allow_export", False))
 
@@ -1646,7 +1728,6 @@ def initialize_data(project_name: str, sets: xr.Dataset) -> xr.Dataset:
             year_coord=year_coord,
         )
 
-        # Prices: (period, scenario, year)
         imp_path = paths.inputs_dir / "grid_import_price.csv"
         grid_import_price = _load_price_csv_dynamic(
             imp_path,
@@ -1669,61 +1750,9 @@ def initialize_data(project_name: str, sets: xr.Dataset) -> xr.Dataset:
             grid_export_price = None
             exp_path = None
 
-        # Availability: we build (period, scenario, year)
-        #  - gate by first_year_connection (if set)
-        #  - within connected years: simulate a typical-year availability using outage params
-        n_p = int(period_coord.size)
-        n_s = int(scenario_coord.size)
-        n_y = int(year_coord.size)
+        grid_availability = regenerate_grid_availability_dynamic(project_name=project_name, sets=sets)
+        grid_avail_csv_path = paths.inputs_dir / "grid_availability.csv"
 
-        avail = np.zeros((n_p, n_s, n_y), dtype=float)
-
-        scenario_labels = [str(s) for s in scenario_coord.values.tolist()]
-        year_labels = [str(y) for y in year_coord.values.tolist()]
-
-        for j, s_lab in enumerate(scenario_labels):
-            ao = float(grid_ds["grid_avg_outages_per_year"].sel(scenario=s_lab).values)
-            ad = float(grid_ds["grid_avg_outage_duration_minutes"].sel(scenario=s_lab).values)
-            scale_od = float(grid_ds["grid_outage_scale_od_hours"].sel(scenario=s_lab).values)
-            shape_od = float(grid_ds["grid_outage_shape_od"].sel(scenario=s_lab).values)
-
-            avail_ty = simulate_grid_availability_dynamic(
-                ao, ad,
-                years=int(year_coord.size),
-                periods_per_year=int(period_coord.size),
-                first_year_connection=int(fy) if np.isfinite(fy) else None,
-                scale_od=scale_od,
-                shape_od=shape_od,
-                rng=None,
-            )
-
-            fy = grid_ds["grid_first_year_connection"].sel(scenario=s_lab).values
-            fy_is_nan = np.isnan(float(fy))
-
-            for k, y_lab in enumerate(year_labels):
-                connected = True
-                if not fy_is_nan:
-                    # compare as ints if possible; otherwise fallback to index-based
-                    try:
-                        connected = int(y_lab) >= int(fy)
-                    except Exception:
-                        # if year labels are not numeric, interpret fy as 1-based index
-                        connected = (k + 1) >= int(fy)
-
-                if connected:
-                    avail[:, j, k] = avail_ty[:, k]
-                else:
-                    avail[:, j, k] = 0.0
-
-        grid_availability = xr.DataArray(
-            avail,
-            coords={"period": period_coord, "scenario": scenario_coord, "year": year_coord},
-            dims=("period", "scenario", "year"),
-            name="grid_availability",
-            attrs={"units": "binary", "component": "grid", "dynamic_only": True},
-        )
-
-        # Merge into data
         to_merge = [
             grid_ds,
             xr.Dataset({"grid_import_price": grid_import_price}),
@@ -1734,7 +1763,6 @@ def initialize_data(project_name: str, sets: xr.Dataset) -> xr.Dataset:
 
         data = xr.merge([data] + to_merge, compat="override", join="exact")
 
-        # attrs bookkeeping
         data.attrs.setdefault("settings", {})
         data.attrs["settings"]["grid"] = {
             "on_grid": True,
@@ -1743,24 +1771,30 @@ def initialize_data(project_name: str, sets: xr.Dataset) -> xr.Dataset:
                 "grid_yaml": str(grid_yaml_path),
                 "grid_import_price_csv": str(imp_path),
                 "grid_export_price_csv": str(exp_path) if allow_export else None,
+                "grid_availability_csv": str(grid_avail_csv_path),
             },
         }
     else:
         data.attrs.setdefault("settings", {})
         data.attrs["settings"]["grid"] = {"on_grid": False, "allow_export": False}
 
-    # ------------------------------------------------------------------
-    # Metadata
-    # ------------------------------------------------------------------
     data.attrs["settings"].update(
         {
             "project_name": project_name,
             "formulation": formulation_mode,
             "unit_commitment": uc_enabled,
+            "start_year_label": formulation.get("start_year_label"),
+            "time_horizon_years": int(year_coord.size),
+            "social_discount_rate": _as_float(
+                formulation.get("social_discount_rate", 0.0),
+                name="social_discount_rate",
+                default=0.0,
+            ),
             "capacity_expansion": capexp_enabled,
+            "investment_steps_years": formulation.get("investment_steps_years"),
             "multi_scenario": {"enabled": ms_enabled, "n_scenarios": n_scen},
             "resources": {
-                "n_resources": int(sets.dims.get("resource", 0)),
+                "n_resources": int(sets.sizes.get("resource", 0)),
                 "resource_labels": sets.coords["resource"].values.tolist(),
             },
             "optimization_constraints": {"enforcement": enforcement},
@@ -1774,7 +1808,6 @@ def initialize_data(project_name: str, sets: xr.Dataset) -> xr.Dataset:
         }
     )
 
-    # store flags + labels for later constraints wiring
     data.attrs["settings"].setdefault("generator", {})
     data.attrs["settings"]["generator"]["partial_load_modelling_enabled"] = bool(
         genfuel_meta.get("partial_load_modelling_enabled", False)
@@ -1785,3 +1818,7 @@ def initialize_data(project_name: str, sets: xr.Dataset) -> xr.Dataset:
     data.attrs["settings"]["battery_label"] = bat_params_ds.attrs.get("battery_label", "Battery")
 
     return data
+
+
+def initialize_data(project_name: str, sets: xr.Dataset) -> xr.Dataset:
+    return load_project_dataset(project_name, sets, mode="multi_year")

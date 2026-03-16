@@ -10,6 +10,9 @@ import linopy as lp
 from core.multi_year_model.sets import initialize_sets
 from core.multi_year_model.data import initialize_data
 from core.multi_year_model.variables import initialize_vars
+from core.multi_year_model.constraints import initialize_constraints
+from core.multi_year_model.objective import initialize_objective
+from core.io.utils import tee_console_output
 
 
 class InputValidationError(RuntimeError):
@@ -68,7 +71,27 @@ class MultiYearModel:
         self.vars = initialize_vars(self.sets, self.data, self.model)
         self._flags.vars_initialized = True
 
-    def _build_model(self) -> None:
+    def _initialize_constraints(self) -> None:
+        if not self._flags.vars_initialized:
+            self._initialize_vars()
+        if self.model is None:
+            raise RuntimeError("_initialize_constraints: model is not initialized.")
+
+        initialize_constraints(self.sets, self.data, self.vars, self.model)
+        self._flags.constraints_initialized = True
+
+    def _initialize_objective(self) -> None:
+        if not self._flags.constraints_initialized:
+            self._initialize_constraints()
+        if self.model is None:
+            raise RuntimeError("_initialize_objective: model is not initialized.")
+
+        initialize_objective(self.sets, self.data, self.vars, self.model)
+        if getattr(self.model, "objective", None) is None:
+            raise RuntimeError("_initialize_objective: objective was not set on linopy model.")
+        self._flags.model_built = True
+
+    def _build_model(self, build_objective: bool = True) -> None:
         if not self._flags.sets_initialized:
             self._initialize_sets()
         if not self._flags.data_initialized:
@@ -77,6 +100,10 @@ class MultiYearModel:
             self._initialize_linopy_model()
         if not self._flags.vars_initialized:
             self._initialize_vars()
+        if not self._flags.constraints_initialized:
+            self._initialize_constraints()
+        if build_objective and not self._flags.model_built:
+            self._initialize_objective()
 
     # ---------------------------------------------------------------------
     # Optional exports
@@ -112,6 +139,21 @@ class MultiYearModel:
         # If nothing worked, at least create a placeholder so UI does not mislead
         problem_fn.write_text("[Could not export via linopy API in this environment]\n", encoding="utf-8")
 
+    def _ensure_log_artifact(self, solver: str) -> None:
+        if self._last_log_path is None:
+            return
+        if self._last_log_path.exists() and self._last_log_path.stat().st_size > 0:
+            return
+        self._last_log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._last_log_path.write_text(
+            (
+                f"Solver: {solver}\n"
+                "No solver log was produced by the current linopy/solver backend.\n"
+                "The solve still completed, but the backend did not emit a file-based log.\n"
+            ),
+            encoding="utf-8",
+        )
+
     # ---------------------------------------------------------------------
     # Solve
     # ---------------------------------------------------------------------
@@ -128,9 +170,16 @@ class MultiYearModel:
           - (optional) decision var snapshots (res_units, battery_units, generator_units)
         The full numeric solution is also available as self.model.solution after solve.
         """
-        self._build_model()
+        self._build_model(build_objective=True)
+        if not self._flags.model_built:
+            raise RuntimeError(
+                "solve_single_objective: objective is not initialized. "
+                "Build the model with objective before solving."
+            )
         if self.model is None:
             raise RuntimeError("solve_single_objective: linopy model is not initialized.")
+        if getattr(self.model, "objective", None) is None:
+            raise RuntimeError("solve_single_objective: objective is missing on linopy model.")
 
         # Record log path for UI (note: solver controls actual logging)
         if log_file_path is not None:
@@ -157,7 +206,22 @@ class MultiYearModel:
             pass
 
         # Solve call
-        result = self.model.solve(solver_name=solver, **solve_kwargs) if "solver_name" in getattr(self.model.solve, "__code__", object()).co_varnames else self.model.solve(solver, **solve_kwargs)
+        solve_fn = self.model.solve
+        try:
+            if self._last_log_path is not None:
+                with tee_console_output(self._last_log_path):
+                    result = solve_fn(solver_name=solver, **solve_kwargs) if "solver_name" in getattr(solve_fn, "__code__", object()).co_varnames else solve_fn(solver, **solve_kwargs)
+            else:
+                result = solve_fn(solver_name=solver, **solve_kwargs) if "solver_name" in getattr(solve_fn, "__code__", object()).co_varnames else solve_fn(solver, **solve_kwargs)
+        except ValueError as e:
+            msg = str(e)
+            if "contains nan" in msg.lower():
+                raise RuntimeError(
+                    "Model contains NaN coefficients (typically in objective/constraints). "
+                    "Check multi-year input parameters for missing/invalid numeric values."
+                ) from e
+            raise
+        self._ensure_log_artifact(solver)
 
         # Linopy stores solution on the model
         sol = getattr(self.model, "solution", None)
@@ -166,7 +230,7 @@ class MultiYearModel:
         # status handling differs across versions: "result" might be a string or object
         out.attrs["solver"] = solver
         out.attrs["solver_params"] = dict(solver_params or {})
-        out.attrs["status"] = str(getattr(result, "status", result))
+        out.attrs["status"] = str(getattr(result, "status", getattr(self.model, "status", result)))
 
         # objective value (best effort)
         obj_val = None
@@ -182,6 +246,11 @@ class MultiYearModel:
             try:
                 if hasattr(result, "objective_value"):
                     obj_val = float(result.objective_value)
+            except Exception:
+                pass
+        if obj_val is None:
+            try:
+                obj_val = float(getattr(self.model.objective, "value"))
             except Exception:
                 pass
         if obj_val is not None:

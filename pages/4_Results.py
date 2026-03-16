@@ -1,13 +1,25 @@
 # generation_planning/pages/3_results.py
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Tuple, List
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import xarray as xr
 import streamlit as st
+
+from core.export.results_bundle import ResultsBundle
+from core.export.results_page_helpers import (
+    build_energy_balance_dataframe,
+    export_results_from_bundle,
+    get_results_bundle_from_session,
+    load_multi_year_results_from_files,
+    load_typical_year_results_from_files,
+)
+from core.visualization.page_helpers import get_dataset_settings, get_nested_flag, safe_float as _safe_float
+from core.visualization.multi_year_results_page import render_multi_year_results, render_multi_year_results_from_files
+from core.visualization.typical_year_file_results_page import render_typical_year_results_from_files
 
 
 # Keep aligned with your Optimization page
@@ -22,31 +34,6 @@ KEYS = {
 # -----------------------------------------------------------------------------
 # small utilities
 # -----------------------------------------------------------------------------
-def _safe_float(x: Any) -> float:
-    try:
-        if x is None:
-            return float("nan")
-        if hasattr(x, "item"):
-            return float(x.item())
-        return float(x)
-    except Exception:
-        return float("nan")
-
-
-def _get_settings(data: xr.Dataset) -> Dict[str, Any]:
-    s = (data.attrs or {}).get("settings", {})
-    return s if isinstance(s, dict) else {}
-
-
-def _get_flag(settings: Dict[str, Any], path: Tuple[str, ...], default: bool = False) -> bool:
-    cur: Any = settings
-    for k in path:
-        if not isinstance(cur, dict) or k not in cur:
-            return default
-        cur = cur[k]
-    return bool(cur)
-
-
 def _get_var_solution(
     *,
     vars_dict: Dict[str, Any],
@@ -54,19 +41,10 @@ def _get_var_solution(
     name: str,
 ) -> Optional[xr.DataArray]:
     """
-    Preferred source: linopy var.solution
-    Fallback: solution dataset contains the variable already.
+    Preferred source: solution dataset variable
+    Fallback: linopy var.solution
     """
-    # 1) from linopy var
-    try:
-        v = vars_dict.get(name, None)
-        if v is not None and hasattr(v, "solution") and v.solution is not None:
-            # typically an xarray.DataArray
-            return v.solution
-    except Exception:
-        pass
-
-    # 2) fallback from xr solution dataset
+    # 1) from xr solution dataset
     if isinstance(sol_ds, xr.Dataset) and name in sol_ds:
         try:
             da = sol_ds[name]
@@ -74,6 +52,14 @@ def _get_var_solution(
                 return da
         except Exception:
             pass
+
+    # 2) fallback from linopy var
+    try:
+        v = vars_dict.get(name, None)
+        if v is not None and hasattr(v, "solution") and v.solution is not None:
+            return v.solution
+    except Exception:
+        pass
 
     return None
 
@@ -135,12 +121,7 @@ def _days_to_slice(T: int, start_day: int, ndays: int) -> Tuple[slice, int, int]
     start_day = int(np.clip(start_day, 1, max_day))
 
     window = ndays * 24
-
-    # 0-based start index
     i0 = (start_day - 1) * 24
-    if i0 + window > T:
-        i0 = max(0, T - window)
-
     i1 = min(T, i0 + window)
 
     # label is 1-based hour index
@@ -225,28 +206,72 @@ def _plot_dispatch_stack(
     ax.legend(ncols=4, fontsize=9, loc="lower center", bbox_to_anchor=(0.5, 1.25))
 
 
-# -----------------------------------------------------------------------------
-# page
-# -----------------------------------------------------------------------------
+def _render_energy_balance_check(bundle: ResultsBundle, tolerance: float = 1e-6) -> None:
+    with st.expander("Energy Balance Check", expanded=False):
+        try:
+            eb = build_energy_balance_dataframe(bundle)
+        except Exception as e:
+            st.info(f"Energy balance unavailable: {e}")
+            return
+
+        max_abs = float(np.max(np.abs(eb["balance_residual"].to_numpy(dtype=float))))
+        mean_res = float(np.mean(eb["balance_residual"].to_numpy(dtype=float)))
+
+        c1, c2 = st.columns(2)
+        c1.metric("Max |residual|", f"{max_abs:.3e}")
+        c2.metric("Mean residual", f"{mean_res:.3e}")
+
+        if max_abs > tolerance:
+            st.warning(f"Residual exceeds tolerance {tolerance:.1e}")
+        else:
+            st.success(f"Residual within tolerance {tolerance:.1e}")
+
+        st.dataframe(eb, width="stretch")
+
+
 def render_generation_planning_results_page() -> None:
     st.title("Results")
-    st.caption("Explore the latest solved results stored in session state.")
+    st.caption("Explore the latest solved results from session state or, if available, saved results loaded from project files.")
 
     project_name = st.session_state.get(KEYS["active_project"])
     if project_name:
         st.success(f"Active project: {project_name}")
 
-    data: Optional[xr.Dataset] = st.session_state.get(KEYS["data"])
-    vars_dict: Optional[Dict[str, Any]] = st.session_state.get(KEYS["vars"])
-    sol_ds: Optional[xr.Dataset] = st.session_state.get(KEYS["solution"])
-
-    if not isinstance(data, xr.Dataset) or not isinstance(vars_dict, dict):
+    # Canonical source for all sections: model.solution -> vars -> data via ResultsBundle helper.
+    bundle = get_results_bundle_from_session(st.session_state, active_project=project_name)
+    if bundle is None or not isinstance(bundle.data, xr.Dataset) or not isinstance(bundle.vars, dict):
+        if project_name:
+            try:
+                file_results = load_typical_year_results_from_files(project_name)
+            except Exception as exc:
+                file_results = None
+                st.warning(f"Saved results could not be loaded from files: {exc}")
+            if file_results is not None:
+                render_typical_year_results_from_files(file_results, project_name)
+                return
+            try:
+                multi_year_file_results = load_multi_year_results_from_files(project_name)
+            except Exception as exc:
+                multi_year_file_results = None
+                st.warning(f"Saved multi-year results could not be loaded from files: {exc}")
+            if multi_year_file_results is not None:
+                render_multi_year_results_from_files(multi_year_file_results, project_name)
+                return
         st.error("No results found. Please run the optimization first (solve step).")
         return
 
-    settings = _get_settings(data)
-    on_grid = _get_flag(settings, ("grid", "on_grid"), default=False)
-    allow_export = _get_flag(settings, ("grid", "allow_export"), default=False)
+    data: xr.Dataset = bundle.data
+    vars_dict: Dict[str, Any] = bundle.vars
+    sol_ds: Optional[xr.Dataset] = bundle.solution if isinstance(bundle.solution, xr.Dataset) else None
+
+    settings = get_dataset_settings(data)
+    formulation = str(settings.get("formulation", "steady_state"))
+    if formulation == "dynamic":
+        render_multi_year_results(bundle, project_name)
+        return
+
+    on_grid = get_nested_flag(settings, ("grid", "on_grid"), default=False)
+    allow_export = get_nested_flag(settings, ("grid", "allow_export"), default=False)
 
     # weights (scenario,)
     w_s = data.get("scenario_weight", None)
@@ -313,7 +338,7 @@ def render_generation_planning_results_page() -> None:
 
     st.dataframe(
         df_size.style.format({"Installed units": "{:,.3g}", "Capacity": "{:,.3g}"}).hide(axis="index"),
-        use_container_width=True,
+        width="stretch",
     )
 
     with st.expander("Per-renewable breakdown", expanded=False):
@@ -326,7 +351,7 @@ def render_generation_planning_results_page() -> None:
         )
         st.dataframe(
             df_res.style.format({"Installed units": "{:,.3g}", "Capacity [kW]": "{:,.3g}"}).hide(axis="index"),
-            use_container_width=True,
+            width="stretch",
         )
 
     # -----------------------------------------------------------------------------
@@ -352,12 +377,35 @@ def render_generation_planning_results_page() -> None:
         gimp_p = _pick_mode(grid_imp, mode=mode, scenario_label=scen_label, w_s=w_s) if grid_imp is not None else 0.0
         gexp_p = _pick_mode(grid_exp, mode=mode, scenario_label=scen_label, w_s=w_s) if grid_exp is not None else 0.0
 
+        grid_eta = data.get("grid_transmission_efficiency", None) if on_grid else None
+        grid_ren_share = data.get("grid_renewable_share", None) if on_grid else None
+        if on_grid and grid_eta is None:
+            grid_eta = xr.DataArray(
+                np.ones(int(data.coords["scenario"].size)),
+                dims=("scenario",),
+                coords={"scenario": data.coords["scenario"]},
+            )
+        if on_grid and grid_ren_share is None:
+            grid_ren_share = xr.DataArray(
+                np.zeros(int(data.coords["scenario"].size)),
+                dims=("scenario",),
+                coords={"scenario": data.coords["scenario"]},
+            )
+
+        grid_delivered_p = (gimp_p * _pick_mode(grid_eta, mode=mode, scenario_label=scen_label, w_s=w_s)) if on_grid else 0.0
+        grid_renewable_p = (
+            grid_delivered_p * _pick_mode(grid_ren_share, mode=mode, scenario_label=scen_label, w_s=w_s)
+            if on_grid
+            else 0.0
+        )
+
         # totals (kWh -> MWh)
         total_load_mwh = _safe_float(load_p.sum("period")) / 1e3
         total_ll_mwh = _safe_float(ll_p.sum("period")) / 1e3
         total_res_mwh = _safe_float(res_p.sum("period")) / 1e3
         total_gen_mwh = _safe_float(gen_p.sum("period")) / 1e3
-        total_imp_mwh = _safe_float(gimp_p.sum("period")) / 1e3 if on_grid else 0.0
+        total_imp_mwh = _safe_float(grid_delivered_p.sum("period")) / 1e3 if on_grid else 0.0
+        total_grid_ren_mwh = _safe_float(grid_renewable_p.sum("period")) / 1e3 if on_grid else 0.0
         total_exp_mwh = _safe_float(gexp_p.sum("period")) / 1e3 if (on_grid and allow_export) else 0.0
 
         delivered_mwh = max(total_load_mwh - total_ll_mwh, 0.0)
@@ -374,7 +422,8 @@ def render_generation_planning_results_page() -> None:
                     "Lost load",
                     "Renewable generation",
                     "Generator generation",
-                    "Grid imports" if on_grid else None,
+                    "Grid imports (delivered)" if on_grid else None,
+                    "Grid renewable contribution" if on_grid else None,
                     "Grid exports" if (on_grid and allow_export) else None,
                     "Renewable share of supply",
                     "Lost load fraction",
@@ -386,8 +435,9 @@ def render_generation_planning_results_page() -> None:
                     total_res_mwh,
                     total_gen_mwh,
                     total_imp_mwh if on_grid else None,
+                    total_grid_ren_mwh if on_grid else None,
                     total_exp_mwh if (on_grid and allow_export) else None,
-                    _pct(total_res_mwh, total_supply_mwh),
+                    _pct(total_res_mwh + total_grid_ren_mwh, total_supply_mwh),
                     _pct(total_ll_mwh, total_load_mwh),
                 ],
                 "Unit": [
@@ -396,6 +446,7 @@ def render_generation_planning_results_page() -> None:
                     "MWh",
                     "MWh",
                     "MWh",
+                    "MWh" if on_grid else None,
                     "MWh" if on_grid else None,
                     "MWh" if (on_grid and allow_export) else None,
                     "%",
@@ -406,7 +457,7 @@ def render_generation_planning_results_page() -> None:
 
         st.dataframe(
             kpi_df.style.format({"Value": "{:,.2f}"}).hide(axis="index"),
-            use_container_width=True,
+            width="stretch",
         )
 
     st.markdown("---")
@@ -443,21 +494,23 @@ def render_generation_planning_results_page() -> None:
     T = int(load_p.sizes["period"])
     with st.expander("Time window", expanded=False):
         st.caption("Pick the start day and how many days to plot (1–7).")
-        start_day = st.slider(
-            "Start day",
-            min_value=1,
-            max_value=max(1, int(np.ceil(T / 24))),
-            value=1,
-            step=1,
-            key="gp_disp_start_day",
-        )
+        max_days = max(1, int(np.ceil(T / 24)))
         ndays = st.slider(
             "Number of days",
             min_value=1,
-            max_value=7,
+            max_value=min(7, max_days),
             value=1,
             step=1,
             key="gp_disp_ndays",
+        )
+        max_start_day = max(1, max_days - ndays + 1)
+        start_day = st.slider(
+            "Start day",
+            min_value=1,
+            max_value=max_start_day,
+            value=1,
+            step=1,
+            key="gp_disp_start_day",
         )
 
     idx, start_hr, window = _days_to_slice(T, start_day=start_day, ndays=ndays)
@@ -491,7 +544,8 @@ def render_generation_planning_results_page() -> None:
         title_suffix=title_suffix,
     )
 
-    st.pyplot(fig, use_container_width=True)
+    st.pyplot(fig, width="stretch")
+    _render_energy_balance_check(bundle, tolerance=1e-6)
 
     # -------------------------------------------------------------------------
     # Cost summary & Cash-flow (objective-consistent)
@@ -584,13 +638,15 @@ def render_generation_planning_results_page() -> None:
         )
 
     # Flags
-    settings = _get_settings(data)
-    on_grid = _get_flag(settings, ("grid", "on_grid"), default=False)
-    allow_export = _get_flag(settings, ("grid", "allow_export"), default=False)
+    settings = get_dataset_settings(data)
+    on_grid = get_nested_flag(settings, ("grid", "on_grid"), default=False)
+    allow_export = get_nested_flag(settings, ("grid", "allow_export"), default=False)
 
     # Grid prices (only if on-grid)
     grid_import_price = data["grid_import_price"] if on_grid else None       # (period, scenario)
     grid_export_price = data["grid_export_price"] if (on_grid and allow_export) else None
+    grid_eta = data.get("grid_transmission_efficiency", None) if on_grid else None
+    grid_em_factor = data.get("grid_emissions_factor_kgco2e_per_kwh", None) if on_grid else None
 
     # -----------------------------
     # 3) Variables (solution)
@@ -692,26 +748,41 @@ def render_generation_planning_results_page() -> None:
         ll_cost_s = (ll.sum("period") * ll_cost_param_s).fillna(0.0)  # (scenario,)
     ll_cost_exp = _safe_float((w_s * ll_cost_s).sum("scenario"))
 
-    # 8.5 Emissions (direct ops + embodied), priced
+    # 8.5 Emissions (scope 1 + scope 2 + scope 3), priced
     emission_cost_s = _as_scenario_da(emission_cost, scenario_like=scenario_like)  # (scenario,)
 
-    direct_ops_kg_s = _zeros_scenario(scenario_like=scenario_like)
+    scope1_kg_s = _zeros_scenario(scenario_like=scenario_like)
     if fuel_cons is not None:
         fc = fuel_cons
         fc = _sum_if_dim(fc, "generator")
-        direct_ops_kg_s = (fc.sum("period") * fuel_dir_kg_per_unit).fillna(0.0)  # (scenario,)
+        scope1_kg_s = (fc.sum("period") * fuel_dir_kg_per_unit).fillna(0.0)  # (scenario,)
+
+    scope2_kg_s = _zeros_scenario(scenario_like=scenario_like)
+    if on_grid and grid_imp is not None:
+        grid_eta_s = _as_scenario_da(grid_eta if grid_eta is not None else 1.0, scenario_like=scenario_like)
+        grid_em_factor_s = _as_scenario_da(grid_em_factor if grid_em_factor is not None else 0.0, scenario_like=scenario_like)
+        scope2_kg_s = ((grid_imp * grid_eta_s).sum("period") * grid_em_factor_s).fillna(0.0)
 
     # Embodied annualized by lifetime (scenario-dependent factors)
     emb_res_kg_s = ((cap_res_kw * res_emb_kg_per_kw) / res_life_y).sum("resource").fillna(0.0)  # (scenario,)
     emb_gen_kg_s = ((cap_gen_kw * gen_emb_kg_per_kw) / gen_life_y).fillna(0.0)                  # (scenario,)
     emb_bat_kg_s = ((cap_bat_kwh * bat_emb_kg_per_kwh) / bat_life_y).fillna(0.0)                # (scenario,)
-    embodied_kg_s = (emb_res_kg_s + emb_gen_kg_s + emb_bat_kg_s).fillna(0.0)                      # (scenario,)
+    scope3_kg_s = _as_scenario_da(
+        (emb_res_kg_s + emb_gen_kg_s + emb_bat_kg_s).fillna(0.0),
+        scenario_like=scenario_like,
+    )
 
-    emissions_cost_s = (emission_cost_s * (direct_ops_kg_s + embodied_kg_s)).fillna(0.0)         # (scenario,)
+    total_emissions_kg_s = _as_scenario_da(
+        (scope1_kg_s + scope2_kg_s + scope3_kg_s).fillna(0.0),
+        scenario_like=scenario_like,
+    )
+    emissions_cost_s = (emission_cost_s * total_emissions_kg_s).fillna(0.0)         # (scenario,)
     emissions_cost_exp = _safe_float((w_s * emissions_cost_s).sum("scenario"))
 
-    direct_ops_kg_exp = _safe_float((w_s * direct_ops_kg_s).sum("scenario"))
-    embodied_kg_exp   = _safe_float((w_s * embodied_kg_s).sum("scenario"))
+    scope1_kg_exp = _safe_float((w_s * scope1_kg_s).sum("scenario"))
+    scope2_kg_exp = _safe_float((w_s * scope2_kg_s).sum("scenario"))
+    scope3_kg_exp = _safe_float((w_s * scope3_kg_s).sum("scenario"))
+    total_emissions_kg_exp = _safe_float((w_s * total_emissions_kg_s).sum("scenario"))
 
     # -----------------------------
     # 9) Total annual costs (objective-consistent)
@@ -786,7 +857,7 @@ def render_generation_planning_results_page() -> None:
             "Upfront gross [thousand]": "{:,.0f}",
             "Upfront net [thousand]": "{:,.0f}",
         }).hide(axis="index"),
-        use_container_width=True,
+        width="stretch",
     )
 
     # ======================================================
@@ -802,14 +873,14 @@ def render_generation_planning_results_page() -> None:
             {"Component": "Grid export revenue (expected)", "Value": -grid_export_rev_exp, "Unit": "/yr"},
             {"Component": "RES production subsidy (expected)", "Value": -res_subsidy_rev_exp, "Unit": "/yr"},
             {"Component": "Lost load penalty (expected)", "Value": ll_cost_exp, "Unit": "/yr"},
-            {"Component": "Emissions cost (direct + embodied, expected)", "Value": emissions_cost_exp, "Unit": "/yr"},
+            {"Component": "Emissions cost (scope 1 + 2 + 3, expected)", "Value": emissions_cost_exp, "Unit": "/yr"},
             {"Component": "TOTAL (Expected)", "Value": total_annual_cost_exp, "Unit": "/yr"},
         ]
     )
 
     st.dataframe(
         df_cost.style.format({"Value": "{:,.0f}"}).hide(axis="index"),
-        use_container_width=True,
+        width="stretch",
     )
 
     # ======================================================
@@ -825,7 +896,7 @@ def render_generation_planning_results_page() -> None:
     )
     st.dataframe(
         df_fom.style.format({"Annual FOM [/yr]": "{:,.0f}"}).hide(axis="index"),
-        use_container_width=True,
+        width="stretch",
     )
 
     # ======================================================
@@ -844,7 +915,7 @@ def render_generation_planning_results_page() -> None:
     df_ann = pd.DataFrame(rows)
     st.dataframe(
         df_ann.style.format({"Annuity [/yr]": "{:,.0f}"}).hide(axis="index"),
-        use_container_width=True,
+        width="stretch",
     )
 
     # --------------------------------------------------
@@ -886,10 +957,10 @@ def render_generation_planning_results_page() -> None:
     # Embodied externalities (annualized) — Expected + breakdown
     # ======================================================
     st.markdown("**Embodied externalities** *(annualized)*")
-    embodied_cost_exp = _safe_float((w_s * (emission_cost_s * embodied_kg_s)).sum("scenario"))
+    embodied_cost_exp = _safe_float((w_s * (emission_cost_s * scope3_kg_s)).sum("scenario"))
 
     c1, c2 = st.columns(2)
-    c1.metric("Embodied emissions (Expected)", f"{embodied_kg_exp:,.0f} kgCO₂e/yr")
+    c1.metric("Embodied emissions (Expected)", f"{scope3_kg_exp:,.0f} kgCO₂e/yr")
     c2.metric("Embodied externality cost (Expected)", f"{embodied_cost_exp:,.0f}/yr")
 
     rows = []
@@ -925,14 +996,14 @@ def render_generation_planning_results_page() -> None:
             "Embodied Emissions [kg/yr]": "{:,.0f}",
             "Embodied Cost [/yr]": "{:,.0f}",
         }).hide(axis="index"),
-        use_container_width=True,
+        width="stretch",
     )
 
     # ======================================================
     # Scenario-specific operational fuel costs (Expected vs Scenario)
     # ======================================================
     st.subheader("Scenario-specific operational costs & emissions")
-    st.caption("Fuel cost and direct emissions can be inspected scenario-by-scenario.")
+    st.caption("Variable operating cost and emissions can be inspected scenario-by-scenario.")
 
     ms_enabled = bool(((settings.get("multi_scenario", {}) or {}).get("enabled", False)))
     if ms_enabled:
@@ -941,28 +1012,72 @@ def render_generation_planning_results_page() -> None:
     else:
         view = "Expected"
 
-    if fuel_cons is not None:
-        fc = fuel_cons
-        fc = _sum_if_dim(fc, "generator")
+    annual_variable_cost_s = (fuel_cost_s + grid_import_cost_s - grid_export_rev_s - res_subsidy_rev_s).fillna(0.0)
+    annual_variable_cost_exp = _safe_float((w_s * annual_variable_cost_s).sum("scenario"))
 
+    if fuel_cons is not None or on_grid:
         if view == "Expected":
-            fuel_view = fuel_cost_exp
-            dir_kg_view = direct_ops_kg_exp
+            variable_cost_view = annual_variable_cost_exp
+            total_emissions_view = total_emissions_kg_exp
         else:
             sc = view.split("Scenario ", 1)[-1].strip()
-            fuel_view = _safe_float((fc.sel(scenario=sc).sum("period") * fuel_cost.sel(scenario=sc)))
-            dir_kg_view = _safe_float((fc.sel(scenario=sc).sum("period") * fuel_dir_kg_per_unit.sel(scenario=sc)))
+            variable_cost_view = _safe_float(annual_variable_cost_s.sel(scenario=sc))
+            total_emissions_view = _safe_float(total_emissions_kg_s.sel(scenario=sc))
 
         m1, m2 = st.columns(2)
-        m1.metric("Annual fuel cost", f"{fuel_view:,.0f}/yr")
-        m2.metric("Direct emissions from fuel", f"{dir_kg_view:,.0f} kgCO₂e/yr")
+        m1.metric("Annual variable cost", f"{variable_cost_view:,.0f}/yr")
+        m2.metric("Total emissions", f"{total_emissions_view:,.0f} kgCO₂e/yr")
     else:
-        st.info("No fuel_consumption variable found; skipping fuel breakdown.")
+        st.info("No fuel or grid-import variables found; skipping emissions breakdown.")
+
+    df_cost_breakdown = pd.DataFrame({
+        "Scenario": [str(s) for s in scenario_like.values.tolist()],
+        "Fuel cost": [float(_safe_float(fuel_cost_s.sel(scenario=s))) for s in scenario_like.values],
+        "Grid import cost": [float(_safe_float(grid_import_cost_s.sel(scenario=s))) for s in scenario_like.values],
+        "Grid export revenue": [float(_safe_float(grid_export_rev_s.sel(scenario=s))) for s in scenario_like.values],
+        "RES subsidy revenue": [float(_safe_float(res_subsidy_rev_s.sel(scenario=s))) for s in scenario_like.values],
+        "Annual variable cost": [float(_safe_float(annual_variable_cost_s.sel(scenario=s))) for s in scenario_like.values],
+        "Weight": [float(_safe_float(w_s.sel(scenario=s))) for s in scenario_like.values],
+    })
+    with st.expander("Scenario-wise variable cost breakdown", expanded=False):
+        st.dataframe(
+            df_cost_breakdown.style.format({
+                "Fuel cost": "{:,.0f}",
+                "Grid import cost": "{:,.0f}",
+                "Grid export revenue": "{:,.0f}",
+                "RES subsidy revenue": "{:,.0f}",
+                "Annual variable cost": "{:,.0f}",
+                "Weight": "{:.3f}",
+            }).hide(axis="index"),
+            width="stretch",
+        )
+
+    df_emissions_breakdown = pd.DataFrame({
+        "Scenario": [str(s) for s in scenario_like.values.tolist()],
+        "Scope 1 emissions": [float(_safe_float(scope1_kg_s.sel(scenario=s))) for s in scenario_like.values],
+        "Scope 2 emissions": [float(_safe_float(scope2_kg_s.sel(scenario=s))) for s in scenario_like.values],
+        "Scope 3 emissions": [float(_safe_float(scope3_kg_s.sel(scenario=s))) for s in scenario_like.values],
+        "Total emissions": [float(_safe_float(total_emissions_kg_s.sel(scenario=s))) for s in scenario_like.values],
+        "Emissions cost": [float(_safe_float(emissions_cost_s.sel(scenario=s))) for s in scenario_like.values],
+        "Weight": [float(_safe_float(w_s.sel(scenario=s))) for s in scenario_like.values],
+    })
+    with st.expander("Scenario-wise emissions breakdown", expanded=False):
+        st.dataframe(
+            df_emissions_breakdown.style.format({
+                "Scope 1 emissions": "{:,.0f}",
+                "Scope 2 emissions": "{:,.0f}",
+                "Scope 3 emissions": "{:,.0f}",
+                "Total emissions": "{:,.0f}",
+                "Emissions cost": "{:,.0f}",
+                "Weight": "{:.3f}",
+            }).hide(axis="index"),
+            width="stretch",
+        )
 
     # ======================================================
     # (Optional) Scenario-wise total operating cost table
     # ======================================================
-    with st.expander("Scenario-wise operating cost breakdown", expanded=False):
+    with st.expander("Scenario-wise total operating cost breakdown", expanded=False):
         df_sc = pd.DataFrame({
             "Scenario": [str(s) for s in scenario_like.values.tolist()],
             "Fixed O&M": [float(_safe_float(annual_fom_s.sel(scenario=s))) for s in scenario_like.values],
@@ -970,7 +1085,12 @@ def render_generation_planning_results_page() -> None:
             "Grid import cost": [float(_safe_float(grid_import_cost_s.sel(scenario=s))) for s in scenario_like.values],
             "Grid export revenue": [float(_safe_float(grid_export_rev_s.sel(scenario=s))) for s in scenario_like.values],
             "RES subsidy revenue": [float(_safe_float(res_subsidy_rev_s.sel(scenario=s))) for s in scenario_like.values],
+            "Annual variable cost": [float(_safe_float(annual_variable_cost_s.sel(scenario=s))) for s in scenario_like.values],
             "Lost load penalty": [float(_safe_float(ll_cost_s.sel(scenario=s))) for s in scenario_like.values],
+            "Scope 1 emissions": [float(_safe_float(scope1_kg_s.sel(scenario=s))) for s in scenario_like.values],
+            "Scope 2 emissions": [float(_safe_float(scope2_kg_s.sel(scenario=s))) for s in scenario_like.values],
+            "Scope 3 emissions": [float(_safe_float(scope3_kg_s.sel(scenario=s))) for s in scenario_like.values],
+            "Total emissions": [float(_safe_float(total_emissions_kg_s.sel(scenario=s))) for s in scenario_like.values],
             "Emissions cost": [float(_safe_float(emissions_cost_s.sel(scenario=s))) for s in scenario_like.values],
             "Total operating cost": [float(_safe_float(annual_operating_cost_s.sel(scenario=s))) for s in scenario_like.values],
             "Weight": [float(_safe_float(w_s.sel(scenario=s))) for s in scenario_like.values],
@@ -982,13 +1102,36 @@ def render_generation_planning_results_page() -> None:
                 "Grid import cost": "{:,.0f}",
                 "Grid export revenue": "{:,.0f}",
                 "RES subsidy revenue": "{:,.0f}",
+                "Annual variable cost": "{:,.0f}",
                 "Lost load penalty": "{:,.0f}",
+                "Scope 1 emissions": "{:,.0f}",
+                "Scope 2 emissions": "{:,.0f}",
+                "Scope 3 emissions": "{:,.0f}",
+                "Total emissions": "{:,.0f}",
                 "Emissions cost": "{:,.0f}",
                 "Total operating cost": "{:,.0f}",
                 "Weight": "{:.3f}",
             }).hide(axis="index"),
-            use_container_width=True,
+            width="stretch",
         )
+
+    # ======================================================
+    # CSV export (Typical-Year)
+    # ======================================================
+    st.subheader("Export Results")
+    if st.button("Export results to CSV", type="primary"):
+        try:
+            with st.spinner("Exporting results..."):
+                model_obj = st.session_state.get("gp_model_obj")
+                written = export_results_from_bundle(project_name, bundle, model_obj=model_obj)
+            st.success("Export completed.")
+            st.json(written)
+            st.markdown("**Generated files**")
+            for _, p in written.items():
+                if isinstance(p, str) and p.endswith(".csv"):
+                    st.write(p)
+        except Exception as e:
+            st.error(f"Export failed: {e}")
 
 
 
