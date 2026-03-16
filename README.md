@@ -1,4 +1,4 @@
-# MicroGridsPy Planning — Streamlit Optimization Tool
+# MicroGridsPy Planning - Streamlit Optimization Tool
 
 MicroGridsPy Planning is a bottom-up, open-source optimization tool for the techno-economic planning of mini-grid energy systems in remote and underserved areas. The model is implemented in Python using Linopy and provides a transparent framework for system sizing, dispatch optimization, and long-term planning under uncertainty.
 
