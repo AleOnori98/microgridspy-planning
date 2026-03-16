@@ -96,11 +96,11 @@ def _build_expected_dispatch(view: pd.DataFrame, weights: Optional[xr.DataArray]
         "grid_import",
         "grid_export",
     ]
-    return (
-        weighted.groupby("period", as_index=False)
-        .apply(lambda g: pd.Series({c: float((g[c] * g["weight"]).sum()) for c in agg_cols}))
-        .reset_index(drop=True)
-    )
+    for col in agg_cols:
+        weighted[f"weighted__{col}"] = weighted[col] * weighted["weight"]
+    grouped = weighted.groupby("period", as_index=False)[[f"weighted__{col}" for col in agg_cols]].sum()
+    grouped.columns = ["period"] + agg_cols
+    return grouped
 
 
 def _average_daily_profile(view: pd.DataFrame, *, start_day: int, ndays: int) -> pd.DataFrame:
@@ -422,7 +422,10 @@ def _build_scenario_costs(
 
 
 def _build_yearly_expected(cash: pd.DataFrame, scenario_costs: pd.DataFrame) -> pd.DataFrame:
+    cash = cash.copy()
+    cash["year"] = cash["year"].astype(str)
     expected = scenario_costs[scenario_costs["scenario"] == "Expected"].copy()
+    expected["year"] = expected["year"].astype(str)
     expected = expected.drop(columns=["scenario", "weight"], errors="ignore")
     yearly = cash.copy().merge(expected, on="year", how="left")
     yearly["annuity_total"] = yearly[["annuity_res", "annuity_battery", "annuity_generator"]].sum(axis=1)
