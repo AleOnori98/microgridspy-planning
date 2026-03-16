@@ -3,19 +3,19 @@ from __future__ import annotations
 import warnings
 
 import xarray as xr
+from core.data_pipeline.utils import validate_required_coords
 
 class InputValidationError(RuntimeError):
     pass
 
 
 def _validate_sets(sets: xr.Dataset) -> None:
-    if not isinstance(sets, xr.Dataset):
-        raise InputValidationError("initialize_data_dynamic expects `sets` as an xarray.Dataset.")
-
-    required = ("period", "scenario", "year", "inv_step", "resource")
-    for c in required:
-        if c not in sets.coords:
-            raise InputValidationError(f"Sets missing required coord: '{c}'")
+    validate_required_coords(
+        sets,
+        required=("period", "scenario", "year", "inv_step", "resource"),
+        error_cls=InputValidationError,
+        context="initialize_data_dynamic",
+    )
 
 
 def _transpose_if_present(ds: xr.Dataset, var_name: str, dims: tuple[str, ...]) -> xr.Dataset:

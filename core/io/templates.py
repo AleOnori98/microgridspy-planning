@@ -7,6 +7,7 @@ from typing import Sequence, Optional, List
 import pandas as pd
 import yaml
 
+from core.io.jsonio import ensure_parent_dir
 from core.io.paths import ProjectPaths
 
 
@@ -159,6 +160,50 @@ def _safe_fuel_label(settings: TemplateSettings) -> str:
     return v or "Fuel"
 
 
+def _template_scenarios(settings: TemplateSettings) -> List[str]:
+    return _safe_scenario_labels(settings) if settings.multi_scenario else ["scenario_1"]
+
+
+def _template_years(settings: TemplateSettings) -> List[str]:
+    return _safe_year_labels(settings)
+
+
+def _ensure_parent_dir(path: Path) -> None:
+    ensure_parent_dir(path)
+
+
+def _write_yaml_file(path: Path, payload: dict) -> None:
+    _ensure_parent_dir(path)
+    with path.open("w", encoding="utf-8") as f:
+        yaml.safe_dump(payload, f, sort_keys=False, allow_unicode=True)
+
+
+def _hourly_index(n_hours: int = 8760) -> pd.RangeIndex:
+    return pd.RangeIndex(start=0, stop=n_hours, step=1)
+
+
+def _write_hourly_csv_template(
+    path: Path,
+    *,
+    columns: pd.MultiIndex,
+    hour_column: tuple,
+    value_columns: list[tuple],
+    overwrite: bool,
+    default_value: float = 0.0,
+) -> None:
+    if path.exists() and not overwrite:
+        return
+
+    hour_index = _hourly_index()
+    df = pd.DataFrame(index=hour_index, columns=columns, dtype="float64")
+    df[hour_column] = hour_index.to_numpy()
+    for column in value_columns:
+        df[column] = default_value
+
+    _ensure_parent_dir(path)
+    df.to_csv(path, index=False)
+
+
 # =============================================================================
 # Writers
 # =============================================================================
@@ -174,14 +219,8 @@ def _write_load_demand_csv(path: Path, settings: TemplateSettings, overwrite: bo
       - includes meta/hour column as ("","hour") with values 0..8759
       - default cells are 0.0 (user to fill in)
     """
-    if path.exists() and not overwrite:
-        return
-
-    n_hours = 8760
-    hour_index = pd.RangeIndex(start=0, stop=n_hours, step=1)
-
-    scenarios = _safe_scenario_labels(settings) if settings.multi_scenario else ["scenario_1"]
-    years = _safe_year_labels(settings)
+    scenarios = _template_scenarios(settings)
+    years = _template_years(settings)
 
     # MultiIndex columns: ("scenario", "year")
     cols = [("meta", "hour")]
@@ -190,18 +229,14 @@ def _write_load_demand_csv(path: Path, settings: TemplateSettings, overwrite: bo
             cols.append((str(s), str(y)))
 
     columns = pd.MultiIndex.from_tuples(cols, names=["scenario", "year"])
-
-    df = pd.DataFrame(index=hour_index, columns=columns, dtype="float64")
-    df[("meta", "hour")] = hour_index.to_numpy()
-
-    # Initialize all demand values to 0.0
-    for s in scenarios:
-        for y in years:
-            df[(str(s), str(y))] = 0.0
-
-    # Ensure parent folder exists
-    path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(path, index=False)
+    value_columns = [(str(s), str(y)) for s in scenarios for y in years]
+    _write_hourly_csv_template(
+        path,
+        columns=columns,
+        hour_column=("meta", "hour"),
+        value_columns=value_columns,
+        overwrite=overwrite,
+    )
 
 def _write_resource_availability_csv(path: Path, settings: TemplateSettings, overwrite: bool = False) -> None:
     """
@@ -216,14 +251,8 @@ def _write_resource_availability_csv(path: Path, settings: TemplateSettings, ove
       - includes meta/hour column as ("","hour","") with values 0..8759
       - default cells are 0.0 (user to fill in)
     """
-    if path.exists() and not overwrite:
-        return
-
-    n_hours = 8760
-    hour_index = pd.RangeIndex(start=0, stop=n_hours, step=1)
-
-    scenarios = _safe_scenario_labels(settings) if settings.multi_scenario else ["scenario_1"]
-    years = _safe_year_labels(settings)
+    scenarios = _template_scenarios(settings)
+    years = _template_years(settings)
     resource_labels = _safe_resource_labels(settings)
 
     cols = [("meta", "hour", "")]
@@ -233,27 +262,22 @@ def _write_resource_availability_csv(path: Path, settings: TemplateSettings, ove
                 cols.append((str(s), str(y), str(r)))
 
     columns = pd.MultiIndex.from_tuples(cols, names=["scenario", "year", "resource"])
-
-    df = pd.DataFrame(index=hour_index, columns=columns, dtype="float64")
-    df[("meta", "hour", "")] = hour_index.to_numpy()
-
-    # Initialize all resource availability values to 0.0
-    for s in scenarios:
-        for y in years:
-            for r in resource_labels:
-                df[(str(s), str(y), str(r))] = 0.0
-
-    # Ensure parent folder exists
-    path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(path, index=False)
+    value_columns = [(str(s), str(y), str(r)) for s in scenarios for y in years for r in resource_labels]
+    _write_hourly_csv_template(
+        path,
+        columns=columns,
+        hour_column=("meta", "hour", ""),
+        value_columns=value_columns,
+        overwrite=overwrite,
+    )
 
 
 def _write_inputs_readme(path: Path, settings: TemplateSettings, overwrite: bool) -> None:
     if path.exists() and not overwrite:
         return
 
-    scenarios = _safe_scenario_labels(settings) if settings.multi_scenario else ["scenario_1"]
-    years = _safe_year_labels(settings)
+    scenarios = _template_scenarios(settings)
+    years = _template_years(settings)
 
     text = (
         "# Inputs folder\n\n"
@@ -316,7 +340,7 @@ def _write_inputs_readme(path: Path, settings: TemplateSettings, overwrite: bool
             "Note: the grid availability matrix is generated by the backend from outage inputs (no user template).\n\n"
         )
 
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_parent_dir(path)
     path.write_text(text, encoding="utf-8")
 
 def _write_renewables_yaml(path: Path, settings: TemplateSettings, overwrite: bool = False) -> None:
@@ -491,9 +515,7 @@ def _write_renewables_yaml(path: Path, settings: TemplateSettings, overwrite: bo
         "renewables": renewables_list,
     }
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        yaml.safe_dump(payload, f, sort_keys=False, allow_unicode=True)
+    _write_yaml_file(path, payload)
 
 
 def _write_battery_yaml(path: Path, settings: TemplateSettings, overwrite: bool = False) -> None:
@@ -526,7 +548,7 @@ def _write_battery_yaml(path: Path, settings: TemplateSettings, overwrite: bool 
     if path.exists() and not overwrite:
         return
 
-    scenarios = _safe_scenario_labels(settings) if settings.multi_scenario else ["scenario_1"]
+    scenarios = _template_scenarios(settings)
     step_keys = _safe_step_keys(settings)  # IMPORTANT: should match sets.inv_step labels, e.g. ["1","2",...]
 
     is_dynamic = (settings.formulation == "dynamic")
@@ -660,9 +682,7 @@ def _write_battery_yaml(path: Path, settings: TemplateSettings, overwrite: bool 
         },
     }
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        yaml.safe_dump(payload, f, sort_keys=False, allow_unicode=True)
+    _write_yaml_file(path, payload)
 
 
 def _write_generator_yaml(path: Path, settings: TemplateSettings, overwrite: bool = False) -> None:
@@ -692,9 +712,9 @@ def _write_generator_yaml(path: Path, settings: TemplateSettings, overwrite: boo
     is_dynamic = (settings.formulation == "dynamic")
     capexp = bool(getattr(settings, "capacity_expansion", False))
 
-    scenarios = _safe_scenario_labels(settings) if settings.multi_scenario else ["scenario_1"]
+    scenarios = _template_scenarios(settings)
     step_keys = _safe_step_keys(settings)
-    years = _safe_year_labels(settings)  # used for fuel cost only when dynamic
+    years = _template_years(settings)  # used for fuel cost only when dynamic
 
     # Optional step metadata (for human readability; not required by loader)
     steps_years = list(getattr(settings, "investment_steps_years", None) or [])
@@ -875,9 +895,7 @@ def _write_generator_yaml(path: Path, settings: TemplateSettings, overwrite: boo
         },
     }
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        yaml.safe_dump(payload, f, sort_keys=False, allow_unicode=True)
+    _write_yaml_file(path, payload)
 
 
 def _write_generator_efficiency_curve_csv(path: Path, overwrite: bool = False) -> None:
@@ -900,7 +918,7 @@ def _write_generator_efficiency_curve_csv(path: Path, overwrite: bool = False) -
         }
     )
 
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_parent_dir(path)
     df.to_csv(path, index=False)
 
 def _write_grid_inputs(paths: ProjectPaths, settings: TemplateSettings, overwrite: bool = False) -> None:
@@ -949,8 +967,8 @@ def _write_grid_yaml(path: Path, settings: TemplateSettings, overwrite: bool = F
     if path.exists() and not overwrite:
         return
 
-    scenarios = _safe_scenario_labels(settings) if settings.multi_scenario else ["scenario_1"]
-    years = _safe_year_labels(settings)  # used for context + dynamic first_year_connection default
+    scenarios = _template_scenarios(settings)
+    years = _template_years(settings)  # used for context + dynamic first_year_connection default
     is_dynamic = (settings.formulation == "dynamic")
     allow_export = bool(getattr(settings, "allow_export", False))
 
@@ -1047,9 +1065,7 @@ def _write_grid_yaml(path: Path, settings: TemplateSettings, overwrite: bool = F
         },
     }
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        yaml.safe_dump(payload, f, sort_keys=False, allow_unicode=True)
+    _write_yaml_file(path, payload)
 
 
 
@@ -1069,14 +1085,8 @@ def _write_grid_import_price_csv(path: Path, settings: TemplateSettings, overwri
       - If dynamic: year labels expand across horizon_years
       - Scenario × year layout mirrors load_demand.csv
     """
-    if path.exists() and not overwrite:
-        return
-
-    n_hours = 8760
-    hour_index = pd.RangeIndex(start=0, stop=n_hours, step=1)
-
-    scenarios = _safe_scenario_labels(settings) if settings.multi_scenario else ["scenario_1"]
-    years = _safe_year_labels(settings)
+    scenarios = _template_scenarios(settings)
+    years = _template_years(settings)
 
     cols = [("meta", "hour")]
     for s in scenarios:
@@ -1084,17 +1094,14 @@ def _write_grid_import_price_csv(path: Path, settings: TemplateSettings, overwri
             cols.append((str(s), str(y)))
 
     columns = pd.MultiIndex.from_tuples(cols, names=["scenario", "year"])
-
-    df = pd.DataFrame(index=hour_index, columns=columns, dtype="float64")
-    df[("meta", "hour")] = hour_index.to_numpy()
-
-    # initialize all data cells to zero
-    for s in scenarios:
-        for y in years:
-            df[(str(s), str(y))] = 0.0
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(path, index=False)
+    value_columns = [(str(s), str(y)) for s in scenarios for y in years]
+    _write_hourly_csv_template(
+        path,
+        columns=columns,
+        hour_column=("meta", "hour"),
+        value_columns=value_columns,
+        overwrite=overwrite,
+    )
 
 
 def _write_grid_export_price_csv(path: Path, settings: TemplateSettings, overwrite: bool = False) -> None:
@@ -1108,14 +1115,8 @@ def _write_grid_export_price_csv(path: Path, settings: TemplateSettings, overwri
       - values are grid export prices (currency per kWh)
       - includes meta/hour column as ("meta","hour") with values 0..8759
     """
-    if path.exists() and not overwrite:
-        return
-
-    n_hours = 8760
-    hour_index = pd.RangeIndex(start=0, stop=n_hours, step=1)
-
-    scenarios = _safe_scenario_labels(settings) if settings.multi_scenario else ["scenario_1"]
-    years = _safe_year_labels(settings)
+    scenarios = _template_scenarios(settings)
+    years = _template_years(settings)
 
     cols = [("meta", "hour")]
     for s in scenarios:
@@ -1123,14 +1124,11 @@ def _write_grid_export_price_csv(path: Path, settings: TemplateSettings, overwri
             cols.append((str(s), str(y)))
 
     columns = pd.MultiIndex.from_tuples(cols, names=["scenario", "year"])
-
-    df = pd.DataFrame(index=hour_index, columns=columns, dtype="float64")
-    df[("meta", "hour")] = hour_index.to_numpy()
-
-    # initialize all data cells to zero
-    for s in scenarios:
-        for y in years:
-            df[(str(s), str(y))] = 0.0
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(path, index=False)
+    value_columns = [(str(s), str(y)) for s in scenarios for y in years]
+    _write_hourly_csv_template(
+        path,
+        columns=columns,
+        hour_column=("meta", "hour"),
+        value_columns=value_columns,
+        overwrite=overwrite,
+    )

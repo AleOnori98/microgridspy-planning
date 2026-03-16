@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import xarray as xr
 
+from core.data_pipeline.utils import coord_labels, validate_required_coords
 from core.io.utils import project_paths, simulate_grid_availability_typical_year
 from core.data_pipeline import typical_year_parsing as p
 
@@ -11,12 +12,12 @@ InputValidationError = p.InputValidationError
 
 
 def _validate_sets(sets: xr.Dataset) -> None:
-    if not isinstance(sets, xr.Dataset):
-        raise InputValidationError("initialize_data expects `sets` as an xarray.Dataset.")
-    if "scenario" not in sets.coords:
-        raise InputValidationError("Sets missing required coord: 'scenario'")
-    if "period" not in sets.coords:
-        raise InputValidationError("Sets missing required coord: 'period'")
+    validate_required_coords(
+        sets,
+        required=("scenario", "period"),
+        error_cls=InputValidationError,
+        context="initialize_data",
+    )
 
 
 def _assemble_grid_block(
@@ -108,7 +109,7 @@ def regenerate_grid_availability_typical_year(
     grid_ds = p._load_grid_yaml(grid_yaml_path, scenario_coord=scenario_coord)
 
     avail_mat = np.zeros((int(period_coord.size), int(scenario_coord.size)), dtype=float)
-    for j, s_lab in enumerate([str(s) for s in scenario_coord.values.tolist()]):
+    for j, s_lab in enumerate(coord_labels(scenario_coord)):
         ao = float(grid_ds["grid_avg_outages_per_year"].sel(scenario=s_lab).values)
         ad = float(grid_ds["grid_avg_outage_duration_minutes"].sel(scenario=s_lab).values)
         scale_od = float(grid_ds["grid_outage_scale_od_hours"].sel(scenario=s_lab).values)

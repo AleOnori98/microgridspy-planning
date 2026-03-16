@@ -8,7 +8,14 @@ import pandas as pd
 import xarray as xr
 import linopy as lp
 
-from core.io.utils import project_paths
+from core.export.common import (
+    InputValidationError,
+    ensure_results_dir,
+    get_var_solution,
+    require_data_array,
+    safe_float,
+    write_csv_outputs,
+)
 from core.multi_year_model.lifecycle import (
     discounted_annuity_tail_memo,
     replacement_active_mask,
@@ -16,48 +23,6 @@ from core.multi_year_model.lifecycle import (
     year_ordinal,
 )
 from core.multi_year_model.params import get_params
-
-
-class InputValidationError(RuntimeError):
-    pass
-
-
-def _safe_float(x: Any) -> float:
-    try:
-        if x is None:
-            return float("nan")
-        if hasattr(x, "item"):
-            return float(x.item())
-        return float(x)
-    except Exception:
-        return float("nan")
-
-
-def _get_var_solution(
-    *,
-    vars: Optional[Dict[str, Any]],
-    solution: Optional[xr.Dataset],
-    name: str,
-) -> Optional[xr.DataArray]:
-    if isinstance(solution, xr.Dataset) and name in solution:
-        da = solution[name]
-        if isinstance(da, xr.DataArray):
-            return da
-    if isinstance(vars, dict):
-        v = vars.get(name, None)
-        try:
-            if v is not None and hasattr(v, "solution") and isinstance(v.solution, xr.DataArray):
-                return v.solution
-        except Exception:
-            pass
-    return None
-
-
-def _require_da(name: str, da: Optional[xr.DataArray]) -> xr.DataArray:
-    if not isinstance(da, xr.DataArray):
-        raise InputValidationError(f"Missing solved variable '{name}' in vars/solution.")
-    return da
-
 
 def _scenario_weights(p: Any, scenario_coord: xr.DataArray) -> xr.DataArray:
     if isinstance(p.scenario_weight, xr.DataArray):
@@ -113,16 +78,16 @@ def build_dispatch_timeseries_table_multi_year(
     solution: Optional[xr.Dataset],
 ) -> pd.DataFrame:
     p = get_params(data)
-    load = _require_da("load_demand", p.load_demand)
-    res = _require_da("res_generation", _get_var_solution(vars=vars, solution=solution, name="res_generation"))
-    gen = _require_da("generator_generation", _get_var_solution(vars=vars, solution=solution, name="generator_generation"))
-    bch = _require_da("battery_charge", _get_var_solution(vars=vars, solution=solution, name="battery_charge"))
-    bdis = _require_da("battery_discharge", _get_var_solution(vars=vars, solution=solution, name="battery_discharge"))
-    bsoc = _require_da("battery_soc", _get_var_solution(vars=vars, solution=solution, name="battery_soc"))
-    ll = _require_da("lost_load", _get_var_solution(vars=vars, solution=solution, name="lost_load"))
+    load = require_data_array("load_demand", p.load_demand)
+    res = require_data_array("res_generation", get_var_solution(vars_dict=vars, solution=solution, name="res_generation"))
+    gen = require_data_array("generator_generation", get_var_solution(vars_dict=vars, solution=solution, name="generator_generation"))
+    bch = require_data_array("battery_charge", get_var_solution(vars_dict=vars, solution=solution, name="battery_charge"))
+    bdis = require_data_array("battery_discharge", get_var_solution(vars_dict=vars, solution=solution, name="battery_discharge"))
+    bsoc = require_data_array("battery_soc", get_var_solution(vars_dict=vars, solution=solution, name="battery_soc"))
+    ll = require_data_array("lost_load", get_var_solution(vars_dict=vars, solution=solution, name="lost_load"))
 
-    gimp = _get_var_solution(vars=vars, solution=solution, name="grid_import") if p.is_grid_on() else None
-    gexp = _get_var_solution(vars=vars, solution=solution, name="grid_export") if p.is_grid_export_enabled() else None
+    gimp = get_var_solution(vars_dict=vars, solution=solution, name="grid_import") if p.is_grid_on() else None
+    gexp = get_var_solution(vars_dict=vars, solution=solution, name="grid_export") if p.is_grid_export_enabled() else None
 
     idx = load.to_series().index
     df = pd.DataFrame(index=idx).reset_index()
@@ -184,12 +149,12 @@ def build_design_by_step_table_multi_year(
     solution: Optional[xr.Dataset],
 ) -> pd.DataFrame:
     p = get_params(data)
-    res_units = _require_da("res_units", _get_var_solution(vars=vars, solution=solution, name="res_units"))
-    bat_units = _require_da("battery_units", _get_var_solution(vars=vars, solution=solution, name="battery_units"))
-    gen_units = _require_da("generator_units", _get_var_solution(vars=vars, solution=solution, name="generator_units"))
-    res_nom = _require_da("res_nominal_capacity_kw", p.res_nominal_capacity_kw)
-    bat_nom = _require_da("battery_nominal_capacity_kwh", p.battery_nominal_capacity_kwh)
-    gen_nom = _require_da("generator_nominal_capacity_kw", p.generator_nominal_capacity_kw)
+    res_units = require_data_array("res_units", get_var_solution(vars_dict=vars, solution=solution, name="res_units"))
+    bat_units = require_data_array("battery_units", get_var_solution(vars_dict=vars, solution=solution, name="battery_units"))
+    gen_units = require_data_array("generator_units", get_var_solution(vars_dict=vars, solution=solution, name="generator_units"))
+    res_nom = require_data_array("res_nominal_capacity_kw", p.res_nominal_capacity_kw)
+    bat_nom = require_data_array("battery_nominal_capacity_kwh", p.battery_nominal_capacity_kwh)
+    gen_nom = require_data_array("generator_nominal_capacity_kw", p.generator_nominal_capacity_kw)
 
     rows = []
     for s in sets.coords["inv_step"].values:
@@ -243,7 +208,7 @@ def build_yearly_kpis_table_multi_year(
 ) -> pd.DataFrame:
     p = get_params(data)
     dispatch = build_dispatch_timeseries_table_multi_year(data=data, vars=vars, solution=solution)
-    fuel = _get_var_solution(vars=vars, solution=solution, name="fuel_consumption")
+    fuel = get_var_solution(vars_dict=vars, solution=solution, name="fuel_consumption")
     w = _scenario_weights(p, p.load_demand.coords["scenario"])
 
     rows = []
@@ -290,7 +255,7 @@ def build_yearly_kpis_table_multi_year(
                 "renewable_penetration": ren_pen,
                 "fuel_consumption": fuel_y,
                 "emissions_kgco2e": em,
-                "objective_value": _safe_float(objective_value),
+                "objective_value": safe_float(objective_value),
             }
         )
 
@@ -303,7 +268,7 @@ def build_yearly_kpis_table_multi_year(
         row = {"year": year, "scenario": "expected"}
         for c in num_cols:
             if c == "objective_value":
-                row[c] = _safe_float(objective_value)
+                row[c] = safe_float(objective_value)
             else:
                 row[c] = float((gy[c] * gy["weight"]).sum())
         expected_rows.append(row)
@@ -322,28 +287,28 @@ def build_discounted_cashflows_table_multi_year(
     rs = float((p.settings.get("social_discount_rate", 0.0) or 0.0))
     disc = 1.0 / ((1.0 + rs) ** year_ordinal(sets))
 
-    res_units = _require_da("res_units", _get_var_solution(vars=vars, solution=solution, name="res_units"))
-    bat_units = _require_da("battery_units", _get_var_solution(vars=vars, solution=solution, name="battery_units"))
-    gen_units = _require_da("generator_units", _get_var_solution(vars=vars, solution=solution, name="generator_units"))
-    res_gen = _require_da("res_generation", _get_var_solution(vars=vars, solution=solution, name="res_generation"))
-    fuel_cons = _require_da("fuel_consumption", _get_var_solution(vars=vars, solution=solution, name="fuel_consumption"))
-    lost_load = _require_da("lost_load", _get_var_solution(vars=vars, solution=solution, name="lost_load"))
-    gimp = _get_var_solution(vars=vars, solution=solution, name="grid_import")
-    gexp = _get_var_solution(vars=vars, solution=solution, name="grid_export")
+    res_units = require_data_array("res_units", get_var_solution(vars_dict=vars, solution=solution, name="res_units"))
+    bat_units = require_data_array("battery_units", get_var_solution(vars_dict=vars, solution=solution, name="battery_units"))
+    gen_units = require_data_array("generator_units", get_var_solution(vars_dict=vars, solution=solution, name="generator_units"))
+    res_gen = require_data_array("res_generation", get_var_solution(vars_dict=vars, solution=solution, name="res_generation"))
+    fuel_cons = require_data_array("fuel_consumption", get_var_solution(vars_dict=vars, solution=solution, name="fuel_consumption"))
+    lost_load = require_data_array("lost_load", get_var_solution(vars_dict=vars, solution=solution, name="lost_load"))
+    gimp = get_var_solution(vars_dict=vars, solution=solution, name="grid_import")
+    gexp = get_var_solution(vars_dict=vars, solution=solution, name="grid_export")
 
-    res_nom = _require_da("res_nominal_capacity_kw", p.res_nominal_capacity_kw)
-    res_capex = _require_da("res_specific_investment_cost_per_kw", p.res_specific_investment_cost_per_kw)
-    res_life = _require_da("res_lifetime_years", p.res_lifetime_years)
-    res_wacc = _require_da("res_wacc", p.res_wacc)
-    res_grant = _require_da("res_grant_share_of_capex", p.res_grant_share_of_capex)
-    bat_nom = _require_da("battery_nominal_capacity_kwh", p.battery_nominal_capacity_kwh)
-    bat_capex = _require_da("battery_specific_investment_cost_per_kwh", p.battery_specific_investment_cost_per_kwh)
-    bat_life = _require_da("battery_calendar_lifetime_years", p.battery_calendar_lifetime_years)
-    bat_wacc = _require_da("battery_wacc", p.battery_wacc)
-    gen_nom = _require_da("generator_nominal_capacity_kw", p.generator_nominal_capacity_kw)
-    gen_capex = _require_da("generator_specific_investment_cost_per_kw", p.generator_specific_investment_cost_per_kw)
-    gen_life = _require_da("generator_lifetime_years", p.generator_lifetime_years)
-    gen_wacc = _require_da("generator_wacc", p.generator_wacc)
+    res_nom = require_data_array("res_nominal_capacity_kw", p.res_nominal_capacity_kw)
+    res_capex = require_data_array("res_specific_investment_cost_per_kw", p.res_specific_investment_cost_per_kw)
+    res_life = require_data_array("res_lifetime_years", p.res_lifetime_years)
+    res_wacc = require_data_array("res_wacc", p.res_wacc)
+    res_grant = require_data_array("res_grant_share_of_capex", p.res_grant_share_of_capex)
+    bat_nom = require_data_array("battery_nominal_capacity_kwh", p.battery_nominal_capacity_kwh)
+    bat_capex = require_data_array("battery_specific_investment_cost_per_kwh", p.battery_specific_investment_cost_per_kwh)
+    bat_life = require_data_array("battery_calendar_lifetime_years", p.battery_calendar_lifetime_years)
+    bat_wacc = require_data_array("battery_wacc", p.battery_wacc)
+    gen_nom = require_data_array("generator_nominal_capacity_kw", p.generator_nominal_capacity_kw)
+    gen_capex = require_data_array("generator_specific_investment_cost_per_kw", p.generator_specific_investment_cost_per_kw)
+    gen_life = require_data_array("generator_lifetime_years", p.generator_lifetime_years)
+    gen_wacc = require_data_array("generator_wacc", p.generator_wacc)
 
     res_inv = res_units * res_nom * res_capex * (1.0 - res_grant)
     bat_inv = bat_units * bat_nom * bat_capex
@@ -359,7 +324,7 @@ def build_discounted_cashflows_table_multi_year(
     ann_gen_y = (ann_gen * act_gen).sum("inv_step")
 
     fuel_price = p.fuel_cost_per_unit_fuel if p.fuel_cost_per_unit_fuel is not None else p.fuel_fuel_cost_per_unit_fuel
-    fuel_price = _require_da("fuel_cost_per_unit_fuel", fuel_price)
+    fuel_price = require_data_array("fuel_cost_per_unit_fuel", fuel_price)
     opex_y_s = (fuel_cons * fuel_price).sum("period")
     if p.is_grid_on() and isinstance(gimp, xr.DataArray) and p.grid_import_price is not None:
         opex_y_s = opex_y_s + (gimp * p.grid_import_price).sum("period")
@@ -406,7 +371,7 @@ def build_discounted_cashflows_table_multi_year(
     years = sets.coords["year"].values.tolist()
     last_year = years[-1]
     for y in years:
-        salvage = float(salvage_tail_memo) if y == last_year else 0.0
+        salvage = safe_float(salvage_tail_memo) if y == last_year else 0.0
         row = {
             "year": y,
             "discount_factor": float(disc.sel(year=y)),
@@ -435,12 +400,13 @@ def export_multi_year_results(
     out_dir: Path | None = None,
 ) -> dict:
     if out_dir is None:
-        out_dir = project_paths(project_name).results_dir
-    out_dir.mkdir(parents=True, exist_ok=True)
+        out_dir = ensure_results_dir(project_name)
+    else:
+        out_dir.mkdir(parents=True, exist_ok=True)
 
     obj = None
     if model is not None and hasattr(model, "objective"):
-        obj = _safe_float(getattr(model.objective, "value", None))
+        obj = safe_float(getattr(model.objective, "value", None))
 
     dispatch = build_dispatch_timeseries_table_multi_year(data=data, vars=vars, solution=solution)
     balance = build_energy_balance_table_multi_year(dispatch)
@@ -448,23 +414,13 @@ def export_multi_year_results(
     kpis = build_yearly_kpis_table_multi_year(data=data, vars=vars, solution=solution, objective_value=obj)
     cash = build_discounted_cashflows_table_multi_year(sets=sets, data=data, vars=vars, solution=solution)
 
-    p_dispatch = out_dir / "dispatch_timeseries.csv"
-    p_balance = out_dir / "energy_balance.csv"
-    p_design = out_dir / "design_by_step.csv"
-    p_kpis = out_dir / "kpis_yearly.csv"
-    p_cash = out_dir / "cashflows_discounted.csv"
-
-    dispatch.to_csv(p_dispatch, index=False)
-    balance.to_csv(p_balance, index=False)
-    design.to_csv(p_design, index=False)
-    kpis.to_csv(p_kpis, index=False)
-    cash.to_csv(p_cash, index=False)
-
-    return {
-        "dispatch_timeseries_csv": str(p_dispatch),
-        "energy_balance_csv": str(p_balance),
-        "design_by_step_csv": str(p_design),
-        "kpis_yearly_csv": str(p_kpis),
-        "cashflows_discounted_csv": str(p_cash),
-        "out_dir": str(out_dir),
-    }
+    return write_csv_outputs(
+        out_dir,
+        {
+            "dispatch_timeseries.csv": dispatch,
+            "energy_balance.csv": balance,
+            "design_by_step.csv": design,
+            "kpis_yearly.csv": kpis,
+            "cashflows_discounted.csv": cash,
+        },
+    )

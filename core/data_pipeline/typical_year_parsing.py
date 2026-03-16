@@ -14,11 +14,14 @@ from core.data_pipeline.utils import (
     as_float_or_nan,
     as_str,
     broadcast_to_scenario,
+    coord_labels,
+    coerce_numeric_array,
     normalize_weights,
+    read_csv_or_raise,
     read_json_or_raise,
     read_yaml_or_raise,
+    validate_hour_column,
 )
-from core.io.utils import project_paths, simulate_grid_availability_typical_year
 
 
 class InputValidationError(RuntimeError):
@@ -35,6 +38,56 @@ _as_float_or_nan = partial(as_float_or_nan, error_cls=InputValidationError)
 _as_str = partial(as_str, error_cls=InputValidationError)
 _normalize_weights = normalize_weights
 _broadcast_to_scenario = broadcast_to_scenario
+
+
+def _load_csv(path: Path, *, header: int | list[int]) -> pd.DataFrame:
+    return read_csv_or_raise(path, header=header, error_cls=InputValidationError)
+
+
+def _scenario_labels(coord: xr.DataArray) -> list[str]:
+    return coord_labels(coord)
+
+
+def _resource_labels(coord: xr.DataArray) -> list[str]:
+    return coord_labels(coord)
+
+
+def _validate_meta_hour_2level(
+    df: pd.DataFrame,
+    *,
+    path: Path,
+    period_coord: xr.DataArray,
+    missing_col_suffix: str = "",
+) -> tuple[np.ndarray, np.ndarray]:
+    if ("meta", "hour") not in df.columns:
+        suffix = f" {missing_col_suffix}".rstrip()
+        raise InputValidationError(f"{path.name}: missing required column ('meta','hour').{suffix}")
+    return validate_hour_column(
+        df[("meta", "hour")],
+        path=path,
+        period_coord=period_coord,
+        error_cls=InputValidationError,
+    )
+
+
+def _validate_meta_hour_3level(
+    df: pd.DataFrame,
+    *,
+    path: Path,
+    period_coord: xr.DataArray,
+) -> tuple[np.ndarray, np.ndarray]:
+    first_col = df.columns[0]
+    if not (len(first_col) == 3 and str(first_col[0]) == "meta" and str(first_col[1]) == "hour"):
+        raise InputValidationError(
+            f"{path.name}: first column must be meta/hour with 3 header rows. "
+            f"Got first column={first_col!r}."
+        )
+    return validate_hour_column(
+        df[first_col],
+        path=path,
+        period_coord=period_coord,
+        error_cls=InputValidationError,
+    )
 
 # -----------------------------------------------------------------------------
 # load data from CSV templates
@@ -58,40 +111,17 @@ def _load_load_demand_csv(
       - scenario columns are (scenario_label,'typical_year')
       - hour must match sets.period exactly (0..8759)
     """
-    if not path.exists():
-        raise InputValidationError(f"Missing required file: {path}")
+    df = _load_csv(path, header=[0, 1])
 
-    df = pd.read_csv(path, header=[0, 1])
-
-    # --- hour column ---
-    # Strict expectation: ("meta","hour")
-    if ("meta", "hour") not in df.columns:
-        raise InputValidationError(
-            f"{path.name}: missing required column ('meta','hour'). "
-            "Your time series templates must include meta/hour as the first column."
-        )
-
-    hour = pd.to_numeric(df[("meta", "hour")], errors="coerce")
-    if hour.isna().any():
-        raise InputValidationError(f"{path.name}: meta/hour contains non-numeric values.")
-
-    hour = hour.astype(int).to_numpy()
-    expected = np.asarray(period_coord.values, dtype=int)
-
-    if hour.shape[0] != expected.shape[0]:
-        raise InputValidationError(
-            f"{path.name}: expected {expected.shape[0]} hours, got {hour.shape[0]}."
-        )
-    if not np.array_equal(hour, expected):
-        # Keep error readable: show first mismatch index
-        mismatch_idx = int(np.where(hour != expected)[0][0])
-        raise InputValidationError(
-            f"{path.name}: meta/hour does not match sets.period. "
-            f"First mismatch at row {mismatch_idx}: file={hour[mismatch_idx]} vs sets={expected[mismatch_idx]}."
-        )
+    hour, _ = _validate_meta_hour_2level(
+        df,
+        path=path,
+        period_coord=period_coord,
+        missing_col_suffix="Your time series templates must include meta/hour as the first column.",
+    )
 
     # --- scenario columns: (scenario_label, typical_year) ---
-    scenario_labels = [str(s) for s in scenario_coord.values.tolist()]
+    scenario_labels = _scenario_labels(scenario_coord)
 
     missing_cols = [(s, "typical_year") for s in scenario_labels if (s, "typical_year") not in df.columns]
     if missing_cols:
@@ -105,7 +135,7 @@ def _load_load_demand_csv(
     mat = df.loc[:, [(s, "typical_year") for s in scenario_labels]].to_numpy()
 
     # validate numeric
-    mat = pd.DataFrame(mat).apply(pd.to_numeric, errors="coerce").to_numpy()
+    mat = coerce_numeric_array(mat)
     if np.isnan(mat).any():
         # identify first bad location (row, col)
         r, c = np.argwhere(np.isnan(mat))[0]
@@ -145,40 +175,11 @@ def _load_resource_availability_csv(
     Returns:
       xr.DataArray availability_cf(period, scenario, resource)
     """
-    if not path.exists():
-        raise InputValidationError(f"Missing required file: {path}")
+    df = _load_csv(path, header=[0, 1, 2])
+    hour, expected = _validate_meta_hour_3level(df, path=path, period_coord=period_coord)
 
-    # 3-level header
-    df = pd.read_csv(path, header=[0, 1, 2])
-
-    # --- hour column ---
-    # Expect first column to be the meta/hour column (3-level key)
-    first_col = df.columns[0]
-    if not (len(first_col) == 3 and str(first_col[0]) == "meta" and str(first_col[1]) == "hour"):
-        raise InputValidationError(
-            f"{path.name}: first column must be meta/hour with 3 header rows. "
-            f"Got first column={first_col!r}.")
-
-    hour = pd.to_numeric(df[first_col], errors="coerce")
-    if hour.isna().any():
-        raise InputValidationError(f"{path.name}: meta/hour contains non-numeric values.")
-
-    hour = hour.astype(int).to_numpy()
-    expected = np.asarray(period_coord.values, dtype=int)
-
-    if hour.shape[0] != expected.shape[0]:
-        raise InputValidationError(
-            f"{path.name}: expected {expected.shape[0]} hours, got {hour.shape[0]}."
-        )
-    if not np.array_equal(hour, expected):
-        mismatch_idx = int(np.where(hour != expected)[0][0])
-        raise InputValidationError(
-            f"{path.name}: meta/hour does not match sets.period. "
-            f"First mismatch at row {mismatch_idx}: file={hour[mismatch_idx]} vs sets={expected[mismatch_idx]}."
-        )
-
-    scenario_labels = [str(s) for s in scenario_coord.values.tolist()]
-    resource_labels = [str(r) for r in resource_coord.values.tolist()]
+    scenario_labels = _scenario_labels(scenario_coord)
+    resource_labels = _resource_labels(resource_coord)
 
     # --- validate required columns exist for every (scenario, year_label, resource) ---
     missing = []
@@ -210,7 +211,7 @@ def _load_resource_availability_csv(
     arr = np.transpose(arr, (1, 0, 2))
 
     # numeric validation
-    arr = pd.DataFrame(arr.reshape(arr.shape[0], -1)).apply(pd.to_numeric, errors="coerce").to_numpy().reshape(arr.shape)
+    arr = coerce_numeric_array(arr.reshape(arr.shape[0], -1)).reshape(arr.shape)
     if np.isnan(arr).any():
         p, s, r = np.argwhere(np.isnan(arr))[0]
         raise InputValidationError(
@@ -266,8 +267,8 @@ def _load_renewables_yaml(
     if not isinstance(ren_list, list) or len(ren_list) == 0:
         raise InputValidationError(f"{path.name}: expected a non-empty list under key 'renewables'.")
 
-    scenario_labels = [str(s) for s in scenario_coord.values.tolist()]
-    resource_labels = [str(r) for r in resource_coord.values.tolist()]
+    scenario_labels = _scenario_labels(scenario_coord)
+    resource_labels = _resource_labels(resource_coord)
     res_to_idx = {lab: i for i, lab in enumerate(resource_labels)}
 
     # For typical-year we keep the same variable names, but no inv_step dimension.
@@ -450,7 +451,7 @@ def _load_battery_yaml(
     if not isinstance(bat, dict):
         raise InputValidationError(f"{path.name}: missing/invalid 'battery' mapping.")
 
-    scenario_labels = [str(s) for s in scenario_coord.values.tolist()]
+    scenario_labels = _scenario_labels(scenario_coord)
     n_s = len(scenario_labels)
 
     INVESTMENT = [
@@ -599,7 +600,7 @@ def _load_generator_and_fuel_yaml(
     if not isinstance(fuel, dict):
         raise InputValidationError(f"{path.name}: missing/invalid 'fuel' mapping.")
 
-    scenario_labels = [str(s) for s in scenario_coord.values.tolist()]
+    scenario_labels = _scenario_labels(scenario_coord)
     n_s = len(scenario_labels)
 
     # -------------------------
@@ -923,34 +924,11 @@ def _load_price_csv_typical_year(
 
     Returns DataArray(period, scenario).
     """
-    if not path.exists():
-        raise InputValidationError(f"Missing required file: {path}")
+    df = _load_csv(path, header=[0, 1])
 
-    df = pd.read_csv(path, header=[0, 1])
+    hour, _ = _validate_meta_hour_2level(df, path=path, period_coord=period_coord)
 
-    # hour col
-    if ("meta", "hour") not in df.columns:
-        raise InputValidationError(
-            f"{path.name}: missing required column ('meta','hour')."
-        )
-    hour = pd.to_numeric(df[("meta", "hour")], errors="coerce")
-    if hour.isna().any():
-        raise InputValidationError(f"{path.name}: meta/hour contains non-numeric values.")
-    hour = hour.astype(int).to_numpy()
-
-    expected = np.asarray(period_coord.values, dtype=int)
-    if hour.shape[0] != expected.shape[0]:
-        raise InputValidationError(
-            f"{path.name}: expected {expected.shape[0]} hours, got {hour.shape[0]}."
-        )
-    if not np.array_equal(hour, expected):
-        mismatch_idx = int(np.where(hour != expected)[0][0])
-        raise InputValidationError(
-            f"{path.name}: meta/hour does not match sets.period. "
-            f"First mismatch at row {mismatch_idx}: file={hour[mismatch_idx]} vs sets={expected[mismatch_idx]}."
-        )
-
-    scenario_labels = [str(s) for s in scenario_coord.values.tolist()]
+    scenario_labels = _scenario_labels(scenario_coord)
     missing_cols = [(s, year_label) for s in scenario_labels if (s, year_label) not in df.columns]
     if missing_cols:
         missing_names = ", ".join([f"({a},{b})" for a, b in missing_cols])
@@ -960,7 +938,7 @@ def _load_price_csv_typical_year(
         )
 
     mat = df.loc[:, [(s, year_label) for s in scenario_labels]].to_numpy()
-    mat = pd.DataFrame(mat).apply(pd.to_numeric, errors="coerce").to_numpy()
+    mat = coerce_numeric_array(mat)
     if np.isnan(mat).any():
         r, c = np.argwhere(np.isnan(mat))[0]
         raise InputValidationError(
@@ -1010,7 +988,7 @@ def _load_grid_yaml(
     if not isinstance(by_scenario, dict):
         raise InputValidationError(f"{path.name}: missing/invalid grid.by_scenario mapping.")
 
-    scenario_labels = [str(s) for s in scenario_coord.values.tolist()]
+    scenario_labels = _scenario_labels(scenario_coord)
 
     # keys (steady_state only)
     PARAMS = [
@@ -1111,7 +1089,7 @@ def _write_grid_availability_csv(
         raise InputValidationError("grid_availability must have dims ('period','scenario').")
 
     period = availability.coords["period"].values.astype(int)
-    scenario_labels = [str(s) for s in availability.coords["scenario"].values.tolist()]
+    scenario_labels = _scenario_labels(availability.coords["scenario"])
 
     cols = [("meta", "hour")] + [(s, year_label) for s in scenario_labels]
     df = pd.DataFrame(columns=pd.MultiIndex.from_tuples(cols))

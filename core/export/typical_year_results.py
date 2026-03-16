@@ -8,50 +8,15 @@ import pandas as pd
 import xarray as xr
 import linopy as lp
 
-from core.io.utils import project_paths
+from core.export.common import (
+    InputValidationError,
+    ensure_results_dir,
+    get_var_solution,
+    require_data_array,
+    safe_float,
+    write_csv_outputs,
+)
 from core.typical_year_model.params import get_params
-
-
-class InputValidationError(RuntimeError):
-    pass
-
-
-def _safe_float(x: Any) -> float:
-    try:
-        if x is None:
-            return float("nan")
-        if hasattr(x, "item"):
-            return float(x.item())
-        return float(x)
-    except Exception:
-        return float("nan")
-
-
-def _get_var_solution(
-    *,
-    vars: Optional[Dict[str, Any]],
-    solution: Optional[xr.Dataset],
-    name: str,
-) -> Optional[xr.DataArray]:
-    if isinstance(vars, dict):
-        v = vars.get(name, None)
-        try:
-            if v is not None and hasattr(v, "solution") and isinstance(v.solution, xr.DataArray):
-                return v.solution
-        except Exception:
-            pass
-    if isinstance(solution, xr.Dataset) and name in solution:
-        da = solution[name]
-        if isinstance(da, xr.DataArray):
-            return da
-    return None
-
-
-def _require_da(name: str, da: Optional[xr.DataArray]) -> xr.DataArray:
-    if not isinstance(da, xr.DataArray):
-        raise InputValidationError(f"Missing solved variable '{name}' in vars/solution.")
-    return da
-
 
 def _sel_scenario_or_self(x: Any, scenario: str) -> Any:
     if isinstance(x, xr.DataArray) and "scenario" in x.dims:
@@ -67,17 +32,17 @@ def build_dispatch_timeseries_table(
 ) -> pd.DataFrame:
     p = get_params(data)
     load = p.load_demand
-    res = _require_da("res_generation", _get_var_solution(vars=vars, solution=solution, name="res_generation"))
-    gen = _require_da("generator_generation", _get_var_solution(vars=vars, solution=solution, name="generator_generation"))
-    bch = _require_da("battery_charge", _get_var_solution(vars=vars, solution=solution, name="battery_charge"))
-    bdis = _require_da("battery_discharge", _get_var_solution(vars=vars, solution=solution, name="battery_discharge"))
-    bsoc = _require_da("battery_soc", _get_var_solution(vars=vars, solution=solution, name="battery_soc"))
-    ll = _require_da("lost_load", _get_var_solution(vars=vars, solution=solution, name="lost_load"))
+    res = require_data_array("res_generation", get_var_solution(vars_dict=vars, solution=solution, name="res_generation", prefer_solution_dataset=False))
+    gen = require_data_array("generator_generation", get_var_solution(vars_dict=vars, solution=solution, name="generator_generation", prefer_solution_dataset=False))
+    bch = require_data_array("battery_charge", get_var_solution(vars_dict=vars, solution=solution, name="battery_charge", prefer_solution_dataset=False))
+    bdis = require_data_array("battery_discharge", get_var_solution(vars_dict=vars, solution=solution, name="battery_discharge", prefer_solution_dataset=False))
+    bsoc = require_data_array("battery_soc", get_var_solution(vars_dict=vars, solution=solution, name="battery_soc", prefer_solution_dataset=False))
+    ll = require_data_array("lost_load", get_var_solution(vars_dict=vars, solution=solution, name="lost_load", prefer_solution_dataset=False))
 
     on_grid = p.is_grid_on()
     allow_export = p.is_grid_export_enabled()
-    gimp = _get_var_solution(vars=vars, solution=solution, name="grid_import") if on_grid else None
-    gexp = _get_var_solution(vars=vars, solution=solution, name="grid_export") if (on_grid and allow_export) else None
+    gimp = get_var_solution(vars_dict=vars, solution=solution, name="grid_import", prefer_solution_dataset=False) if on_grid else None
+    gexp = get_var_solution(vars_dict=vars, solution=solution, name="grid_export", prefer_solution_dataset=False) if (on_grid and allow_export) else None
 
     records = []
     res_total = res.sum("resource")
@@ -156,26 +121,26 @@ def build_design_summary_table(
     solution: Optional[xr.Dataset],
 ) -> pd.DataFrame:
     p = get_params(data)
-    res_units = _require_da("res_units", _get_var_solution(vars=vars, solution=solution, name="res_units"))
-    bat_units = _require_da("battery_units", _get_var_solution(vars=vars, solution=solution, name="battery_units"))
-    gen_units = _require_da("generator_units", _get_var_solution(vars=vars, solution=solution, name="generator_units"))
+    res_units = require_data_array("res_units", get_var_solution(vars_dict=vars, solution=solution, name="res_units", prefer_solution_dataset=False))
+    bat_units = require_data_array("battery_units", get_var_solution(vars_dict=vars, solution=solution, name="battery_units", prefer_solution_dataset=False))
+    gen_units = require_data_array("generator_units", get_var_solution(vars_dict=vars, solution=solution, name="generator_units", prefer_solution_dataset=False))
 
     res_cap = res_units * p.res_nominal_capacity_kw
     bat_cap = bat_units * p.battery_nominal_capacity_kwh
     gen_cap = gen_units * p.generator_nominal_capacity_kw
 
     row: Dict[str, Any] = {
-        "battery_units": _safe_float(bat_units),
-        "battery_installed_kwh": _safe_float(bat_cap),
-        "generator_units": _safe_float(gen_units),
-        "generator_installed_kw": _safe_float(gen_cap),
-        "res_units_total": _safe_float(res_units.sum("resource")),
-        "res_installed_kw_total": _safe_float(res_cap.sum("resource")),
+        "battery_units": safe_float(bat_units),
+        "battery_installed_kwh": safe_float(bat_cap),
+        "generator_units": safe_float(gen_units),
+        "generator_installed_kw": safe_float(gen_cap),
+        "res_units_total": safe_float(res_units.sum("resource")),
+        "res_installed_kw_total": safe_float(res_cap.sum("resource")),
     }
     for r in res_units.coords["resource"].values:
         label = str(r)
-        row[f"res_units__{label}"] = _safe_float(res_units.sel(resource=r))
-        row[f"res_installed_kw__{label}"] = _safe_float(res_cap.sel(resource=r))
+        row[f"res_units__{label}"] = safe_float(res_units.sel(resource=r))
+        row[f"res_installed_kw__{label}"] = safe_float(res_cap.sel(resource=r))
     return pd.DataFrame([row])
 
 
@@ -201,10 +166,10 @@ def build_kpis_table(
     dispatch = build_dispatch_timeseries_table(data=data, vars=vars, solution=solution)
     scen_labels = [str(s) for s in p.load_demand.coords["scenario"].values]
 
-    res_units = _require_da("res_units", _get_var_solution(vars=vars, solution=solution, name="res_units"))
-    bat_units = _require_da("battery_units", _get_var_solution(vars=vars, solution=solution, name="battery_units"))
-    gen_units = _require_da("generator_units", _get_var_solution(vars=vars, solution=solution, name="generator_units"))
-    fuel_cons = _get_var_solution(vars=vars, solution=solution, name="fuel_consumption")
+    res_units = require_data_array("res_units", get_var_solution(vars_dict=vars, solution=solution, name="res_units", prefer_solution_dataset=False))
+    bat_units = require_data_array("battery_units", get_var_solution(vars_dict=vars, solution=solution, name="battery_units", prefer_solution_dataset=False))
+    gen_units = require_data_array("generator_units", get_var_solution(vars_dict=vars, solution=solution, name="generator_units", prefer_solution_dataset=False))
+    fuel_cons = get_var_solution(vars_dict=vars, solution=solution, name="fuel_consumption", prefer_solution_dataset=False)
 
     cap_res_kw = res_units * p.res_nominal_capacity_kw
     cap_bat_kwh = bat_units * p.battery_nominal_capacity_kwh
@@ -216,9 +181,9 @@ def build_kpis_table(
         coords={"resource": p.res_wacc.coords["resource"]},
     )
     ann_res = (crf_res * (1.0 - p.res_grant_share_of_capex) * p.res_specific_investment_cost_per_kw * cap_res_kw).sum("resource")
-    ann_bat = _crf(_safe_float(p.battery_wacc), _safe_float(p.battery_calendar_lifetime_years)) * _safe_float(p.battery_specific_investment_cost_per_kwh * cap_bat_kwh)
-    ann_gen = _crf(_safe_float(p.generator_wacc), _safe_float(p.generator_lifetime_years)) * _safe_float(p.generator_specific_investment_cost_per_kw * cap_gen_kw)
-    annuity = _safe_float(ann_res) + ann_bat + ann_gen
+    ann_bat = _crf(safe_float(p.battery_wacc), safe_float(p.battery_calendar_lifetime_years)) * safe_float(p.battery_specific_investment_cost_per_kwh * cap_bat_kwh)
+    ann_gen = _crf(safe_float(p.generator_wacc), safe_float(p.generator_lifetime_years)) * safe_float(p.generator_specific_investment_cost_per_kw * cap_gen_kw)
+    annuity = safe_float(ann_res) + ann_bat + ann_gen
 
     rows = []
     for s in scen_labels:
@@ -285,7 +250,7 @@ def build_kpis_table(
                 "grid_net_cost": grid_cost,
                 "lost_load_cost": ll_cost,
                 "emissions_cost": em_cost,
-                "objective_value": _safe_float(objective_value),
+                "objective_value": safe_float(objective_value),
             }
         )
 
@@ -296,7 +261,7 @@ def build_kpis_table(
     num_cols = [c for c in kpis.columns if c not in ("scenario",)]
     expected = {"scenario": "expected"}
     for c in num_cols:
-        expected[c] = float((kpis[c] * kpis["weight"]).sum()) if c != "objective_value" else _safe_float(objective_value)
+        expected[c] = float((kpis[c] * kpis["weight"]).sum()) if c != "objective_value" else safe_float(objective_value)
     return pd.concat([kpis.drop(columns=["weight"]), pd.DataFrame([expected])], ignore_index=True)
 
 
@@ -317,33 +282,26 @@ def export_typical_year_results(
     out_dir: Path | None = None,
 ) -> dict:
     if out_dir is None:
-        out_dir = project_paths(project_name).results_dir / "typical_year"
-    out_dir.mkdir(parents=True, exist_ok=True)
+        out_dir = ensure_results_dir(project_name, suffix="typical_year")
+    else:
+        out_dir.mkdir(parents=True, exist_ok=True)
 
     model_obj = model
     objective_value = None
     if model_obj is not None and hasattr(model_obj, "objective"):
-        objective_value = _safe_float(getattr(model_obj.objective, "value", None))
+        objective_value = safe_float(getattr(model_obj.objective, "value", None))
 
     dispatch_df = build_dispatch_timeseries_table(data=data, vars=vars, solution=solution)
     energy_df = build_energy_balance_table(dispatch_df)
     design_df = build_design_summary_table(data=data, vars=vars, solution=solution)
     kpi_df = build_kpis_table(data=data, vars=vars, solution=solution, objective_value=objective_value)
 
-    p_dispatch = out_dir / "dispatch_timeseries.csv"
-    p_energy = out_dir / "energy_balance.csv"
-    p_design = out_dir / "design_summary.csv"
-    p_kpis = out_dir / "kpis.csv"
-
-    dispatch_df.to_csv(p_dispatch, index=False)
-    energy_df.to_csv(p_energy, index=False)
-    design_df.to_csv(p_design, index=False)
-    kpi_df.to_csv(p_kpis, index=False)
-
-    return {
-        "dispatch_timeseries_csv": str(p_dispatch),
-        "energy_balance_csv": str(p_energy),
-        "design_summary_csv": str(p_design),
-        "kpis_csv": str(p_kpis),
-        "out_dir": str(out_dir),
-    }
+    return write_csv_outputs(
+        out_dir,
+        {
+            "dispatch_timeseries.csv": dispatch_df,
+            "energy_balance.csv": energy_df,
+            "design_summary.csv": design_df,
+            "kpis.csv": kpi_df,
+        },
+    )

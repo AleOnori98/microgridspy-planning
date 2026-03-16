@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 
 import pandas as pd
 import xarray as xr
 
+from core.export.common import get_bundle_formulation, get_var_solution as _get_var_solution_common
 from core.export.results_bundle import ResultsBundle, build_results_bundle
 from core.export.typical_year_results import (
     build_dispatch_timeseries_table,
@@ -17,7 +17,6 @@ from core.export.multi_year_results import (
     build_energy_balance_table_multi_year,
     export_multi_year_results,
 )
-from core.io.utils import project_paths
 
 
 def get_results_bundle_from_session(session_state: Mapping[str, Any]) -> Optional[ResultsBundle]:
@@ -44,33 +43,18 @@ def get_results_bundle_from_session(session_state: Mapping[str, Any]) -> Optiona
         solver=None,
     )
 
-
-def get_var_solution(
-    *,
-    bundle: ResultsBundle,
-    name: str,
-) -> Optional[xr.DataArray]:
-    sol = bundle.solution
-    if isinstance(sol, xr.Dataset) and name in sol:
-        da = sol[name]
-        if isinstance(da, xr.DataArray):
-            return da
-
-    vars_dict = bundle.vars if isinstance(bundle.vars, dict) else {}
-    v = vars_dict.get(name, None)
-    try:
-        if v is not None and hasattr(v, "solution") and isinstance(v.solution, xr.DataArray):
-            return v.solution
-    except Exception:
-        pass
-    return None
+def get_var_solution(*, bundle: ResultsBundle, name: str) -> Optional[xr.DataArray]:
+    return _get_var_solution_common(
+        vars_dict=bundle.vars if isinstance(bundle.vars, dict) else None,
+        solution=bundle.solution if isinstance(bundle.solution, xr.Dataset) else None,
+        name=name,
+    )
 
 
 def build_energy_balance_dataframe(bundle: ResultsBundle) -> pd.DataFrame:
     if bundle.data is None or not isinstance(bundle.vars, dict):
         raise RuntimeError("Missing data/vars in ResultsBundle.")
-    settings = (bundle.data.attrs or {}).get("settings", {}) if isinstance(bundle.data, xr.Dataset) else {}
-    formulation = str(settings.get("formulation", "steady_state"))
+    formulation = get_bundle_formulation(bundle)
     if formulation == "dynamic":
         dispatch = build_dispatch_timeseries_table_multi_year(
             data=bundle.data,
@@ -95,9 +79,7 @@ def export_results_from_bundle(
         raise RuntimeError("Missing data/vars in ResultsBundle.")
 
     sets_ds = bundle.sets if isinstance(bundle.sets, xr.Dataset) else xr.Dataset()
-    out_dir = project_paths(project_name).results_dir
-    settings = (bundle.data.attrs or {}).get("settings", {}) if isinstance(bundle.data, xr.Dataset) else {}
-    formulation = str(settings.get("formulation", "steady_state"))
+    formulation = get_bundle_formulation(bundle)
     if formulation == "dynamic":
         return export_multi_year_results(
             project_name=project_name,
@@ -106,7 +88,7 @@ def export_results_from_bundle(
             model=getattr(model_obj, "model", None),
             vars=bundle.vars,
             solution=bundle.solution if isinstance(bundle.solution, xr.Dataset) else None,
-            out_dir=Path(out_dir),
+            out_dir=None,
         )
     return export_typical_year_results(
         project_name=project_name,
@@ -115,5 +97,5 @@ def export_results_from_bundle(
         model=getattr(model_obj, "model", None),
         vars=bundle.vars,
         solution=bundle.solution if isinstance(bundle.solution, xr.Dataset) else None,
-        out_dir=Path(out_dir),
+        out_dir=None,
     )

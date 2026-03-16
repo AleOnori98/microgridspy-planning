@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from core.io.paths import ProjectPaths
+from core.io.jsonio import ensure_parent_dir
 
 
 class _TeeTextStream:
@@ -32,7 +33,7 @@ class _TeeTextStream:
 
 @contextlib.contextmanager
 def tee_console_output(log_path: Path):
-    log_path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_parent_dir(log_path)
     with log_path.open("w", encoding="utf-8", errors="replace") as handle:
         stdout_tee = _TeeTextStream(sys.stdout, handle)
         stderr_tee = _TeeTextStream(sys.stderr, handle)
@@ -52,7 +53,7 @@ def get_projects_root(base_dir: Path | None = None) -> Path:
     """Get the root directory where projects are stored."""
     if base_dir is None:
         base_dir = Path.cwd()
-    return base_dir / "projects" # repo root convention: a "projects" directory next to src/
+    return base_dir / "projects"
 
 
 def project_paths(project_name: str, base_dir: Path | None = None) -> ProjectPaths:
@@ -70,10 +71,8 @@ def project_exists(project_name: str, base_dir: Path | None = None) -> bool:
 def ensure_project_structure(project_name: str, base_dir: Path | None = None) -> ProjectPaths:
     """Ensure that the project directory structure exists."""
     paths = project_paths(project_name, base_dir)
-    paths.root.mkdir(parents=True, exist_ok=True)
-    paths.inputs_dir.mkdir(parents=True, exist_ok=True)
-    paths.results_dir.mkdir(parents=True, exist_ok=True)
-    paths.logs_dir.mkdir(parents=True, exist_ok=True)
+    for directory in (paths.root, paths.inputs_dir, paths.results_dir, paths.logs_dir):
+        directory.mkdir(parents=True, exist_ok=True)
     return paths
 
 

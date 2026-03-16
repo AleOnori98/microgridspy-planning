@@ -4,7 +4,7 @@ from typing import Literal
 
 import xarray as xr
 
-from core.data_pipeline.utils import as_str
+from core.data_pipeline.utils import as_str, validate_required_coords
 from core.data_pipeline.multi_year_loader import load_multi_year_dataset
 from core.data_pipeline.typical_year_loader import (
     load_typical_year_dataset,
@@ -38,6 +38,16 @@ def _coerce_sets(sets: dict | xr.Dataset) -> xr.Dataset:
     raise InputValidationError("initialize_data expects `sets` as an xarray.Dataset.")
 
 
+def _validate_sets_for_mode(sets: xr.Dataset, mode: str) -> None:
+    required = ("period", "scenario", "year", "inv_step", "resource") if mode == "multi_year" else ("period", "scenario")
+    validate_required_coords(
+        sets,
+        required=required,
+        error_cls=InputValidationError,
+        context="initialize_data_dynamic" if mode == "multi_year" else "initialize_data",
+    )
+
+
 def load_project_dataset(
     project_name: str,
     sets: dict,
@@ -55,9 +65,11 @@ def load_project_dataset(
     sets_ds = _coerce_sets(sets)
 
     if mode_s == "typical_year":
+        _validate_sets_for_mode(sets_ds, mode_s)
         return load_typical_year_dataset(project_name, sets_ds)
 
     if mode_s == "multi_year":
+        _validate_sets_for_mode(sets_ds, mode_s)
         return load_multi_year_dataset(project_name, sets_ds)
 
     raise ValueError(f"Unsupported mode: {mode!r}. Expected 'typical_year' or 'multi_year'.")
