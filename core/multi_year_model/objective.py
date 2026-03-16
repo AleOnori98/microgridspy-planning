@@ -248,6 +248,19 @@ def initialize_objective(
 
     total_cashflow_y = expected_cashflow_y + emb_y
 
+    # ------------------------------------------------------------------
+    # Battery dispatch regularization (internal tie-breaker)
+    # ------------------------------------------------------------------
+    # Encourage solutions without simultaneous charge/discharge and avoid
+    # degenerate circulation loops. Not a degradation model.
+    #
+    # epsilon in currency/kWh (tiny), aligned with the typical-year model.
+    epsilon = 1e-6
+    bat_ch = vars["battery_charge"]
+    bat_dis = vars["battery_discharge"]
+    bat_throughput_y_s = (bat_ch + bat_dis).sum("period")
+    bat_reg_cost_y = epsilon * (bat_throughput_y_s * w_s).sum("scenario")
+
     # Reporting-only memo: tail of the last active replacement annuity beyond
     # the horizon. It is intentionally excluded from the optimization objective
     # to keep the annuity-based annual cashflow convention coherent.
@@ -257,5 +270,5 @@ def initialize_objective(
         + discounted_annuity_tail_memo(sets, gen_annuity, gen_life_y, rs).sum("inv_step")
     )
 
-    npwc = (total_cashflow_y * disc_y).sum("year")
+    npwc = ((total_cashflow_y + bat_reg_cost_y) * disc_y).sum("year")
     model.add_objective(npwc, overwrite=True)

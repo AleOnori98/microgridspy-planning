@@ -1712,7 +1712,15 @@ def _initialize_data_legacy(project_name: str, sets: xr.Dataset) -> xr.Dataset:
             "project_name": project_name,
             "formulation": formulation_mode,
             "unit_commitment": uc_enabled,
+            "start_year_label": formulation.get("start_year_label"),
+            "time_horizon_years": int(year_coord.size),
+            "social_discount_rate": _as_float(
+                formulation.get("social_discount_rate", 0.0),
+                name="social_discount_rate",
+                default=0.0,
+            ),
             "capacity_expansion": capexp_enabled,
+            "investment_steps_years": formulation.get("investment_steps_years"),
             "multi_scenario": {"enabled": ms_enabled, "n_scenarios": n_scen},
             "resources": {
                 "n_resources": int(sets.sizes.get("resource", 0)),
