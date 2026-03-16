@@ -208,30 +208,6 @@ def _plot_dispatch_stack(
     ax.legend(ncols=4, fontsize=9, loc="lower center", bbox_to_anchor=(0.5, 1.25))
 
 
-def _render_quick_inspection(bundle: ResultsBundle) -> None:
-    with st.expander("Quick inspection", expanded=False):
-        data = bundle.data
-        sol = bundle.solution
-        vars_dict = bundle.vars if isinstance(bundle.vars, dict) else {}
-
-        if isinstance(data, xr.Dataset):
-            st.markdown("**Data dims**")
-            st.json({k: int(v) for k, v in data.sizes.items()})
-            st.markdown("**Data variables (first 20)**")
-            st.write(sorted(list(data.data_vars))[:20])
-        else:
-            st.info("No data dataset available.")
-
-        if isinstance(sol, xr.Dataset):
-            st.markdown("**Solution variables (first 20)**")
-            st.write(sorted(list(sol.data_vars))[:20])
-        else:
-            st.info("No solution dataset available on model.")
-
-        st.markdown("**Vars dict size**")
-        st.write(len(vars_dict))
-
-
 def _render_energy_balance_check(bundle: ResultsBundle, tolerance: float = 1e-6) -> None:
     with st.expander("Energy Balance Check", expanded=False):
         try:
@@ -272,8 +248,6 @@ def render_generation_planning_results_page() -> None:
     data: xr.Dataset = bundle.data
     vars_dict: Dict[str, Any] = bundle.vars
     sol_ds: Optional[xr.Dataset] = bundle.solution if isinstance(bundle.solution, xr.Dataset) else None
-
-    _render_quick_inspection(bundle)
 
     settings = get_dataset_settings(data)
     formulation = str(settings.get("formulation", "steady_state"))
