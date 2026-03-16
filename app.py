@@ -12,14 +12,90 @@ st.set_page_config(
 
 
 ASSETS_DIR = Path(__file__).resolve().parent / "assets"
+DOCS_DIR = Path(__file__).resolve().parent / "docs"
 REPOSITORY_URL = "https://github.com/AleOnori98/microgridspy-planning"
 RAMP_URL = "https://github.com/AleOnori98/RAMP-Streamlit"
 PVGIS_URL = "https://github.com/AleOnori98/PVGIS-Streamlit-App"
 LV_TOPOLOGY_URL = "https://github.com/AleOnori98/LV-Distribution-Topology-Streamlit"
+ONLINE_DOCS_URL = "https://microgridspy-documentation.readthedocs.io/en/latest/index.html"
+
+ECOSYSTEM_TOOL_ROWS = (
+    (
+        {
+            "title": "RAMP Demand Model",
+            "description": "Bottom-up stochastic demand assessment for appliances, households, and community load evolution.",
+            "image_name": "ramp_tool_card.png",
+            "badge": "Upstream input layer",
+            "repo_url": RAMP_URL,
+        },
+        {
+            "title": "PVGIS Resource Assessment",
+            "description": "Solar and wind resource estimation used to build planning-ready renewable input profiles.",
+            "image_name": "pvgis_tool_card.png",
+            "badge": "Upstream input layer",
+            "repo_url": PVGIS_URL,
+        },
+    ),
+    (
+        {
+            "title": "LV Distribution Topology Tool",
+            "description": "Distribution network layout, pole placement, and topology design for the physical electrification layer.",
+            "image_name": "distribution_tool_card.jpeg",
+            "badge": "Network design layer",
+            "repo_url": LV_TOPOLOGY_URL,
+        },
+        {
+            "title": "Dispatch Simulation Module",
+            "description": "Detailed operational analysis starting from a predefined system design, useful for operational realism and control studies.",
+            "image_name": "simulation_tool_card.png",
+            "badge": "Operational analysis layer",
+        },
+    ),
+)
+
+APP_PAGE_LINKS = (
+    ("pages/0_Project_Setup.py", "1. Project Setup"),
+    ("pages/1_Data_Audit_and_Visualization.py", "2. Data Audit and Visualization"),
+    ("pages/3_Optimization.py", "3. Optimization"),
+    ("pages/4_Results.py", "4. Results"),
+)
+
+REPOSITORY_REFERENCES = (
+    "`README.md`: overall project scope and workflow",
+    "`docs/DATA_CONTRACT.md`: canonical dataset contract",
+    "`docs/Mathematical_Formulation.pdf`: formulation reference",
+    "`docs/User_Guide.pdf`: user guide draft",
+    "`projects/`: example projects and input templates",
+)
+
+PDF_PREVIEWS = (
+    {
+        "title": "Mathematical Formulation",
+        "caption": "Complete formulation reference with the current model structure and equations.",
+        "file_name": "Mathematical_Formulation.pdf",
+        "key": "mathematical_formulation_preview",
+    },
+    {
+        "title": "User Guide",
+        "caption": "Working user guide preview. The document is available here, but it is still being updated.",
+        "file_name": "User_Guide.pdf",
+        "key": "user_guide_preview",
+    },
+)
+
+USEFUL_LINKS = (
+    ("Mathematical Formulation (PDF)", "https://github.com/AleOnori98/microgridspy-planning/blob/main/docs/Mathematical_Formulation.pdf"),
+    ("User Guide (PDF draft)", "https://github.com/AleOnori98/microgridspy-planning/blob/main/docs/User_Guide.pdf"),
+    ("Online Documentation (work in progress)", ONLINE_DOCS_URL),
+)
 
 
 def _asset(name: str) -> str:
     return str(ASSETS_DIR / name)
+
+
+def _doc(name: str) -> Path:
+    return DOCS_DIR / name
 
 
 def _inject_css() -> None:
@@ -33,86 +109,6 @@ def _inject_css() -> None:
             --mgpy-gold: #f4b942;
             --mgpy-surface: #f7fbfc;
             --mgpy-border: rgba(21, 50, 67, 0.10);
-        }
-        .hero-wrap {
-            padding: 1.75rem 1.5rem;
-            border-radius: 22px;
-            background:
-                radial-gradient(circle at top right, rgba(244, 185, 66, 0.28), transparent 30%),
-                linear-gradient(135deg, #f7fbfc 0%, #e8f4f6 52%, #fefaf1 100%);
-            border: 1px solid var(--mgpy-border);
-            margin-bottom: 1rem;
-        }
-        .hero-kicker {
-            color: var(--mgpy-accent);
-            font-size: 0.9rem;
-            font-weight: 700;
-            text-transform: uppercase;
-            letter-spacing: 0.08em;
-            margin-bottom: 0.35rem;
-        }
-        .hero-title {
-            color: var(--mgpy-ink);
-            font-size: 2.35rem;
-            line-height: 1.1;
-            font-weight: 800;
-            margin-bottom: 0.65rem;
-        }
-        .hero-body {
-            color: var(--mgpy-muted);
-            font-size: 1.05rem;
-            line-height: 1.65;
-            max-width: 1000px;
-        }
-        .section-note {
-            color: var(--mgpy-muted);
-            font-size: 0.98rem;
-            line-height: 1.6;
-            margin-bottom: 0.75rem;
-        }
-        .step-card {
-            padding: 1rem 1.05rem;
-            border-radius: 18px;
-            background: white;
-            border: 1px solid var(--mgpy-border);
-            min-height: 150px;
-        }
-        .step-num {
-            color: var(--mgpy-accent);
-            font-size: 0.85rem;
-            font-weight: 800;
-            letter-spacing: 0.08em;
-            text-transform: uppercase;
-        }
-        .step-title {
-            color: var(--mgpy-ink);
-            font-size: 1.08rem;
-            font-weight: 700;
-            margin: 0.25rem 0 0.45rem 0;
-        }
-        .step-copy {
-            color: var(--mgpy-muted);
-            font-size: 0.94rem;
-            line-height: 1.55;
-        }
-        .resource-box {
-            padding: 1rem 1.05rem;
-            border-radius: 18px;
-            background: #fff;
-            border: 1px solid var(--mgpy-border);
-            height: 100%;
-        }
-        .resource-title {
-            color: var(--mgpy-ink);
-            font-size: 1rem;
-            font-weight: 700;
-            margin-bottom: 0.4rem;
-        }
-        .resource-copy {
-            color: var(--mgpy-muted);
-            font-size: 0.93rem;
-            line-height: 1.55;
-            margin-bottom: 0;
         }
         .featured-card {
             display: block;
@@ -142,14 +138,6 @@ def _inject_css() -> None:
             border: 1px solid #2f80ed;
             color: white;
             font-weight: 700;
-        }
-        .card-link {
-            color: var(--mgpy-accent);
-            font-weight: 600;
-            text-decoration: none;
-        }
-        .card-link:hover {
-            text-decoration: underline;
         }
         </style>
         """,
@@ -193,6 +181,49 @@ def _tool_card(
             st.markdown(f"[GitHub repository]({repo_url})")
 
 
+def _render_pdf_preview(*, title: str, caption: str, file_name: str, key: str) -> None:
+    pdf_path = _doc(file_name)
+    with st.container(border=True):
+        st.markdown(f"**{title}**")
+        st.caption(caption)
+        if not pdf_path.exists():
+            st.warning(f"Missing file: `{pdf_path.name}`")
+            return
+
+        if hasattr(st, "pdf"):
+            try:
+                st.pdf(str(pdf_path), height=520, key=key)
+            except Exception:
+                st.info(
+                    "PDF preview is unavailable in this Streamlit environment. "
+                    "Install the PDF extra to enable embedded previews."
+                )
+        else:
+            st.info(
+                "This Streamlit version does not expose `st.pdf()` yet, so the embedded preview is not available."
+            )
+
+        with pdf_path.open("rb") as pdf_file:
+            st.download_button(
+                "Download PDF",
+                data=pdf_file.read(),
+                file_name=pdf_path.name,
+                mime="application/pdf",
+                key=f"{key}_download",
+                use_container_width=True,
+            )
+
+
+def _render_markdown_bullets(title: str, items: tuple[str, ...]) -> None:
+    bullet_lines = "\n".join(f"- {item}" for item in items)
+    st.markdown(f"**{title}**\n\n{bullet_lines}")
+
+
+def _render_useful_links() -> None:
+    link_lines = "\n".join(f"- {label}: {url}" for label, url in USEFUL_LINKS)
+    st.markdown(f"**Useful links**:\n\n{link_lines}")
+
+
 def _render_ecosystem() -> None:
     st.title("Welcome to MicroGridsPy!")
     st.markdown(
@@ -206,40 +237,11 @@ def _render_ecosystem() -> None:
 
     _render_featured_planning_card()
     st.subheader("Ecosystem tools")
-    row1 = st.columns(2, gap="large")
-    with row1[0]:
-        _tool_card(
-            title="RAMP Demand Model",
-            description="Bottom-up stochastic demand assessment for appliances, households, and community load evolution.",
-            image_name="ramp_tool_card.png",
-            badge="Upstream input layer",
-            repo_url=RAMP_URL,
-        )
-    with row1[1]:
-        _tool_card(
-            title="PVGIS Resource Assessment",
-            description="Solar and wind resource estimation used to build planning-ready renewable input profiles.",
-            image_name="pvgis_tool_card.png",
-            badge="Upstream input layer",
-            repo_url=PVGIS_URL,
-        )
-
-    row2 = st.columns(2, gap="large")
-    with row2[0]:
-        _tool_card(
-            title="LV Distribution Topology Tool",
-            description="Distribution network layout, pole placement, and topology design for the physical electrification layer.",
-            image_name="distribution_tool_card.jpeg",
-            badge="Network design layer",
-            repo_url=LV_TOPOLOGY_URL,
-        )
-    with row2[1]:
-        _tool_card(
-            title="Dispatch Simulation Module",
-            description="Detailed operational analysis starting from a predefined system design, useful for operational realism and control studies.",
-            image_name="simulation_tool_card.png",
-            badge="Operational analysis layer",
-        )
+    for tool_row in ECOSYSTEM_TOOL_ROWS:
+        columns = st.columns(len(tool_row), gap="large")
+        for column, tool in zip(columns, tool_row):
+            with column:
+                _tool_card(**tool)
 
 
 def _render_resources() -> None:
@@ -253,21 +255,11 @@ def _render_resources() -> None:
     c1, c2 = st.columns([1, 3.0], gap="large")
     with c1:
         st.markdown("**Start here in this app**")
-        st.page_link("pages/0_Project_Setup.py", label="1. Project Setup")
-        st.page_link("pages/1_Data_Audit_and_Visualization.py", label="2. Data Audit and Visualization")
-        st.page_link("pages/3_Optimization.py", label="3. Optimization")
-        st.page_link("pages/4_Results.py", label="4. Results")
+        for page_path, label in APP_PAGE_LINKS:
+            st.page_link(page_path, label=label)
 
     with c2:
-        st.markdown("**Repository references**")
-        st.markdown(
-            """
-            - `README.md`: overall project scope and workflow
-            - `docs/DATA_CONTRACT.md`: canonical dataset contract
-            - `MicroGridsPy___Mathematical_Formulation_2_0.pdf`: formulation reference
-            - `projects/`: example projects and input templates
-            """
-        )
+        _render_markdown_bullets("Repository references", REPOSITORY_REFERENCES)
 
     st.write("")
     st.markdown("**At a glance**")
@@ -280,14 +272,14 @@ def _render_resources() -> None:
         st.info("Use together: Resource, demand, planning, network, and dispatch modules can be combined at increasing levels of detail.")
 
     st.write("")
-    st.markdown(
-        """
-        **Useful links**:
+    st.markdown("**Documentation preview**")
+    pdf_cols = st.columns(2, gap="large")
+    for column, preview in zip(pdf_cols, PDF_PREVIEWS):
+        with column:
+            _render_pdf_preview(**preview)
 
-        - User Guide (PDF): https://github.com/AleOnori98/microgridspy-planning/blob/main/MicroGridsPy___Mathematical_Formulation_2_0.pdf 
-        - Online Documentation (work in progress): https://microgridspy-documentation.readthedocs.io/en/latest/index.html 
-        """
-    )
+    st.write("")
+    _render_useful_links()
 
 
 
