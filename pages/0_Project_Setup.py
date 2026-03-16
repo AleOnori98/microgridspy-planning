@@ -827,7 +827,7 @@ def render_constraints_section() -> Tuple[str, float, float, float, float]:
 def render_project_setup_page() -> None:
     init_session_state_defaults()
 
-    st.title("Generation Planning Tool")
+    st.title("Project Setup")
     st.markdown(
         "Configure your planning model, generate a project folder with input templates, "
         "then fill the files externally and come back to validate/run the model."

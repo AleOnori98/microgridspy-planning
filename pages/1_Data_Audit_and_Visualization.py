@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -345,7 +346,7 @@ def _render_soft_check_warnings(ds: xr.Dataset) -> None:
 
 
 def _render_file_section(project_root: Path, formulation: Dict[str, Any], paths) -> bool:
-    st.subheader("Section A - Required Input Files")
+    st.subheader("Required Input Files")
     st.caption(f"Check that the active project contains the inputs required to construct the canonical dataset. Project path: `{project_root}`")
 
     required_df = _build_file_table(paths, REQUIRED_INPUTS)
@@ -370,7 +371,7 @@ def _render_file_section(project_root: Path, formulation: Dict[str, Any], paths)
 
 
 def _render_dataset_section(ds: xr.Dataset, loader_mode: str, paths) -> None:
-    st.subheader("Section B - Dataset Summary")
+    st.subheader("Dataset Summary")
     st.caption("Load the canonical dataset through the shared pipeline and inspect its structure before optimization.")
 
     c1, c2, c3 = st.columns(3)
@@ -529,7 +530,7 @@ def _infer_y_label(variable: str) -> str:
 
 
 def _render_timeseries_section(ds: xr.Dataset) -> None:
-    st.subheader("Section C - Time-Series Visualization")
+    st.subheader("Time-Series Visualization")
     st.caption("Explore canonical time-series variables directly from the loaded dataset.")
 
     options = list_timeseries_options(ds)
@@ -621,6 +622,247 @@ def _format_plot_title(text: str) -> str:
     return text.replace("_", " ")
 
 
+def _comparison_options(ds: xr.Dataset) -> List[Any]:
+    options = []
+    for option in list_timeseries_options(ds):
+        da = ds[option.variable]
+        if "year" not in da.dims:
+            continue
+        if option.variable in {"load_demand", "resource_availability", "grid_import_price", "grid_export_price", "grid_availability"}:
+            options.append(option)
+    return options
+
+
+def _daily_profile_frame(series: xr.DataArray) -> pd.DataFrame:
+    values = np.asarray(series.values, dtype=float).reshape(-1)
+    frame = pd.DataFrame(
+        {
+            "hour_of_day": (np.arange(values.size) % 24) + 1,
+            "value": values,
+        }
+    )
+    return frame.groupby("hour_of_day", as_index=False)["value"].mean()
+
+
+def _style_bar_axis(ax: plt.Axes, labels: List[str]) -> None:
+    if not labels:
+        return
+
+    tick_step = max(1, int(np.ceil(len(labels) / 10)))
+    if len(labels) > 10:
+        tick_positions = np.arange(0, len(labels), tick_step)
+        ax.set_xticks(tick_positions, [labels[idx] for idx in tick_positions])
+        rotation = 45
+    else:
+        ax.set_xticks(np.arange(len(labels)), labels)
+        rotation = 0 if len(labels) <= 6 else 30
+
+    ax.tick_params(axis="x", labelrotation=rotation, labelsize=9, pad=6)
+    for tick in ax.get_xticklabels():
+        tick.set_horizontalalignment("right" if rotation else "center")
+
+
+def _render_bar_plot(df: pd.DataFrame, *, x: str, y: str, hue: str | None, title: str, y_label: str) -> None:
+    x_labels = df[x].astype(str).unique().tolist()
+    width_scale = max(10, min(14, len(x_labels) * 0.6))
+    fig, ax = plt.subplots(figsize=(width_scale, 4.2))
+    if hue is None:
+        positions = np.arange(len(x_labels))
+        values = df.set_index(df[x].astype(str)).reindex(x_labels)[y].to_numpy(dtype=float)
+        ax.bar(positions, values, color="#1f7a8c", alpha=0.85)
+        _style_bar_axis(ax, x_labels)
+    else:
+        hue_values = df[hue].astype(str).unique().tolist()
+        x_values = x_labels
+        width = 0.8 / max(len(hue_values), 1)
+        positions = np.arange(len(x_values))
+        for idx, hue_value in enumerate(hue_values):
+            subset = df[df[hue].astype(str) == hue_value].copy()
+            subset = subset.set_index(subset[x].astype(str)).reindex(x_values).reset_index(drop=True)
+            ax.bar(
+                positions + (idx - (len(hue_values) - 1) / 2.0) * width,
+                subset[y].to_numpy(dtype=float),
+                width=width,
+                label=hue_value,
+                alpha=0.85,
+            )
+        _style_bar_axis(ax, x_values)
+        ax.legend(ncols=3, fontsize=9)
+    ax.set_title(title)
+    ax.set_xlabel("Year")
+    ax.set_ylabel(y_label)
+    ax.grid(True, axis="y", alpha=0.25, linestyle=":")
+    fig.tight_layout()
+    st.pyplot(fig, width="stretch")
+
+
+def _render_multi_year_input_comparison(ds: xr.Dataset) -> None:
+    if "year" not in ds.coords:
+        return
+
+    scenario = None
+    if "scenario" in ds.coords:
+        scenarios = [str(v) for v in ds.coords["scenario"].values.tolist()]
+        scenario = st.selectbox("Scenario for year comparison", options=scenarios, index=0, key="audit_compare_year_scenario")
+
+    years = ds.coords["year"].values.tolist()
+
+    load_rows = []
+    if "load_demand" in ds:
+        for year in years:
+            series = slice_timeseries(ds, variable="load_demand", scenario=scenario, year=year, selectors={})
+            load_rows.append({"year": str(year), "value": float(np.nansum(series.values))})
+        _render_bar_plot(
+            pd.DataFrame(load_rows),
+            x="year",
+            y="value",
+            hue=None,
+            title="Yearly load demand",
+            y_label="Total demand [kWh/year]",
+        )
+
+    if "resource_availability" in ds:
+        res_rows = []
+        resource_values = ds.coords["resource"].values.tolist() if "resource" in ds.coords else []
+        for year in years:
+            for resource in resource_values:
+                series = slice_timeseries(
+                    ds,
+                    variable="resource_availability",
+                    scenario=scenario,
+                    year=year,
+                    selectors={"resource": resource},
+                )
+                res_rows.append(
+                    {
+                        "year": str(year),
+                        "resource": str(resource),
+                        "value": float(np.nanmean(series.values)),
+                    }
+                )
+        if res_rows:
+            _render_bar_plot(
+                pd.DataFrame(res_rows),
+                x="year",
+                y="value",
+                hue="resource",
+                title="Average renewable capacity factor by year",
+                y_label="Average capacity factor [-]",
+            )
+
+    if "grid_import_price" in ds:
+        price_rows = []
+        for year in years:
+            series = slice_timeseries(ds, variable="grid_import_price", scenario=scenario, year=year, selectors={})
+            price_rows.append({"year": str(year), "value": float(np.nanmean(series.values))})
+        _render_bar_plot(
+            pd.DataFrame(price_rows),
+            x="year",
+            y="value",
+            hue=None,
+            title="Average yearly grid import price",
+            y_label="Average price [currency/kWh]",
+        )
+
+    if "grid_export_price" in ds and bool(((ds.attrs.get("settings", {}) or {}).get("grid", {}) or {}).get("allow_export", False)):
+        export_rows = []
+        for year in years:
+            series = slice_timeseries(ds, variable="grid_export_price", scenario=scenario, year=year, selectors={})
+            export_rows.append({"year": str(year), "value": float(np.nanmean(series.values))})
+        _render_bar_plot(
+            pd.DataFrame(export_rows),
+            x="year",
+            y="value",
+            hue=None,
+            title="Average yearly grid export price",
+            y_label="Average price [currency/kWh]",
+        )
+
+    if "grid_availability" in ds:
+        availability_rows = []
+        for year in years:
+            series = slice_timeseries(ds, variable="grid_availability", scenario=scenario, year=year, selectors={})
+            availability_rows.append({"year": str(year), "value": int(np.sum(np.asarray(series.values, dtype=float) > 0.5))})
+        _render_bar_plot(
+            pd.DataFrame(availability_rows),
+            x="year",
+            y="value",
+            hue=None,
+            title="Available grid hours by year",
+            y_label="Available hours [h/year]",
+        )
+
+    if "scenario" in ds.coords and int(ds.sizes.get("scenario", 0)) > 1:
+        st.markdown("**Scenario comparison for selected year**")
+        st.caption("Compare scenario-level yearly summaries for one selected model year.")
+
+        year = st.selectbox(
+            "Year for scenario comparison",
+            options=ds.coords["year"].values.tolist(),
+            index=0,
+            key="audit_compare_scenario_year",
+        )
+        metric = st.selectbox(
+            "Metric for scenario comparison",
+            options=[
+                "Load demand",
+                "Renewable capacity factor",
+                "Grid import price",
+                "Grid export price",
+                "Grid availability",
+            ],
+            index=0,
+            key="audit_compare_scenario_metric",
+        )
+
+        if metric == "Renewable capacity factor" and "resource" in ds.coords:
+            resource = st.selectbox(
+                "Resource for scenario comparison",
+                options=ds.coords["resource"].values.tolist(),
+                index=0,
+                key="audit_compare_scenario_resource",
+            )
+        else:
+            resource = None
+
+        rows = []
+        for scenario_label in ds.coords["scenario"].values.tolist():
+            selectors = {"resource": resource} if resource is not None else {}
+            if metric == "Load demand" and "load_demand" in ds:
+                series = slice_timeseries(ds, variable="load_demand", scenario=str(scenario_label), year=year, selectors={})
+                value = float(np.nansum(series.values))
+                y_label = "Total demand [kWh/year]"
+            elif metric == "Renewable capacity factor" and "resource_availability" in ds and resource is not None:
+                series = slice_timeseries(ds, variable="resource_availability", scenario=str(scenario_label), year=year, selectors=selectors)
+                value = float(np.nanmean(series.values))
+                y_label = "Average capacity factor [-]"
+            elif metric == "Grid import price" and "grid_import_price" in ds:
+                series = slice_timeseries(ds, variable="grid_import_price", scenario=str(scenario_label), year=year, selectors={})
+                value = float(np.nanmean(series.values))
+                y_label = "Average price [currency/kWh]"
+            elif metric == "Grid export price" and "grid_export_price" in ds:
+                series = slice_timeseries(ds, variable="grid_export_price", scenario=str(scenario_label), year=year, selectors={})
+                value = float(np.nanmean(series.values))
+                y_label = "Average price [currency/kWh]"
+            elif metric == "Grid availability" and "grid_availability" in ds:
+                series = slice_timeseries(ds, variable="grid_availability", scenario=str(scenario_label), year=year, selectors={})
+                value = int(np.sum(np.asarray(series.values, dtype=float) > 0.5))
+                y_label = "Available hours [h/year]"
+            else:
+                continue
+            rows.append({"scenario": str(scenario_label), "value": value})
+
+        if rows:
+            _render_bar_plot(
+                pd.DataFrame(rows),
+                x="scenario",
+                y="value",
+                hue=None,
+                title=f"{metric} across scenarios - {year}",
+                y_label=y_label,
+            )
+
+
 def render_page() -> None:
     st.title("Data Audit and Visualization")
     st.caption("Validate project inputs, load the canonical dataset, and inspect time-series data before optimization.")
@@ -645,7 +887,7 @@ def render_page() -> None:
         try:
             _, ds, loader_mode = _load_sets_and_dataset(project_name, formulation)
         except Exception as exc:
-            st.subheader("Section B - Dataset Loading + Summary")
+            st.subheader("Dataset Loading + Summary")
             st.error(f"Dataset loading failed: {exc}")
             st.stop()
 
@@ -655,6 +897,11 @@ def render_page() -> None:
     if ds is not None:
         st.markdown("---")
         _render_timeseries_section(ds)
+        if loader_mode == "multi_year":
+            st.markdown("---")
+            st.subheader("Multi-Year Input Comparison")
+            st.caption("Compare compact yearly summaries of demand, renewable availability, and grid-related inputs.")
+            _render_multi_year_input_comparison(ds)
 
 
 render_page()
