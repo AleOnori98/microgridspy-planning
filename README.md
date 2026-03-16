@@ -174,6 +174,31 @@ The objective is based on expected net present cost and includes the time value 
 
 ---
 
+## Planning Modes Comparison
+
+The two planning modes serve different purposes. The table below summarizes their main strengths and limitations.
+
+| Aspect | Typical-Year Planning | Multi-Year Planning |
+| --- | --- | --- |
+| Visual cue | 🟢 Compact and fast | 🔵 Richer and more realistic |
+| Main purpose | Representative-year planning and rapid screening | Long-term planning across an explicit horizon |
+| Time structure | One recurring representative year | Multiple consecutive years |
+| Investment logic | Single design decision with annualized costs | Time-dependent investments with discounted cash flows |
+| Capacity expansion | Not represented explicitly | Supported when enabled |
+| Degradation and replacement | Not modeled explicitly in time | Can be represented across the planning horizon |
+| Computational effort | Lower | Higher |
+| Input complexity | Lower | Higher |
+| Best suited for | Early feasibility, technology comparison, sensitivity screening | Expansion planning, staged investment analysis, long-term policy studies |
+| Main advantages | Simple setup, fast solve times, easier scenario exploration | More realistic timing of investments and operations, better long-term interpretation |
+| Main limitations | Cannot capture timing of expansion, aging, or horizon effects | More data-intensive, heavier computationally, more complex to interpret |
+
+### Quick Guidance
+
+- Choose `Typical-Year` when you need a simpler and faster model for screening alternatives or understanding the basic least-cost structure of the system.
+- Choose `Multi-Year` when investment timing, degradation, grid arrival, evolving demand, or staged expansion materially affect the planning outcome.
+
+---
+
 ## Main Modeling Features
 
 Depending on project setup, the application can represent:
