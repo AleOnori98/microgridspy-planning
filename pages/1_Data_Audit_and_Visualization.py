@@ -299,6 +299,60 @@ def _format_parameter_value(da: xr.DataArray) -> str:
     return f"array{tuple(int(v) for v in da.shape)} [{preview}]"
 
 
+def _optimization_constraints_summary(ds: xr.Dataset) -> pd.DataFrame:
+    settings = (ds.attrs or {}).get("settings", {}) or {}
+    constraints = settings.get("optimization_constraints", {}) or {}
+    if not isinstance(constraints, dict):
+        constraints = {}
+
+    descriptions = {
+        "enforcement": "Constraint enforcement mode across scenarios.",
+        "min_renewable_penetration": "Minimum renewable penetration target.",
+        "max_lost_load_fraction": "Maximum allowed unmet demand share.",
+        "lost_load_cost_per_kwh": "Penalty applied to unserved energy.",
+        "land_availability_m2": "Maximum land available for renewable siting.",
+        "emission_cost_per_kgco2e": "Carbon cost included in the objective function.",
+    }
+    units = {
+        "enforcement": "",
+        "min_renewable_penetration": "share",
+        "max_lost_load_fraction": "share",
+        "lost_load_cost_per_kwh": "currency_per_kWh",
+        "land_availability_m2": "m2",
+        "emission_cost_per_kgco2e": "currency_per_kgCO2e",
+    }
+    constraint_keys = [
+        "enforcement",
+        "min_renewable_penetration",
+        "max_lost_load_fraction",
+        "lost_load_cost_per_kwh",
+        "land_availability_m2",
+        "emission_cost_per_kgco2e",
+    ]
+
+    rows = []
+    for key in constraint_keys:
+        if key in ds.data_vars:
+            value = _format_parameter_value(ds[key])
+        else:
+            value = constraints.get(key)
+        if value is None:
+            continue
+        rows.append(
+            {
+                "constraint": key,
+                "value": value if isinstance(value, str) else _format_scalar_value(value),
+                "unit": units.get(key, ""),
+                "description": descriptions.get(key, ""),
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame()
+
+    return pd.DataFrame(rows)
+
+
 def _soft_checks(ds: xr.Dataset) -> List[Tuple[str, str]]:
     checks: List[Tuple[str, str]] = []
 
@@ -405,6 +459,12 @@ def _render_dataset_section(ds: xr.Dataset, loader_mode: str, paths) -> None:
 
     st.markdown("**Parameters**")
     st.dataframe(_parameter_summary(ds, paths), width="stretch", hide_index=True)
+
+    constraints_df = _optimization_constraints_summary(ds)
+    if not constraints_df.empty:
+        st.markdown("**Optimization System Constraints**")
+        st.caption("Project-level optimization constraints loaded from `formulation.json` and attached to the canonical dataset metadata.")
+        st.dataframe(constraints_df, width="stretch", hide_index=True)
 
     with st.expander("Dataset metadata", expanded=False):
         st.json(dict(ds.attrs or {}))
