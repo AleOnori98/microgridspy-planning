@@ -10,7 +10,7 @@
   "unit_commitment": false,
   "start_year_label": "2026",
   "time_horizon_years": 5,
-  "social_discount_rate": 0.5,
+  "social_discount_rate": 0.05,
   "capacity_expansion": false,
   "investment_steps_years": null,
   "multi_scenario": {
