@@ -71,6 +71,7 @@ class Params:
     grid_line_capacity_kw: Optional[xr.DataArray]
     grid_transmission_efficiency: Optional[xr.DataArray]
     grid_renewable_share: Optional[xr.DataArray]
+    grid_emissions_factor_kgco2e_per_kwh: Optional[xr.DataArray]
     grid_availability: Optional[xr.DataArray]
     grid_import_price: Optional[xr.DataArray]
     grid_export_price: Optional[xr.DataArray]
@@ -149,6 +150,7 @@ def get_params(ds: xr.Dataset) -> Params:
         grid_line_capacity_kw=_opt("grid_line_capacity_kw"),
         grid_transmission_efficiency=_opt("grid_transmission_efficiency"),
         grid_renewable_share=_opt("grid_renewable_share"),
+        grid_emissions_factor_kgco2e_per_kwh=_opt("grid_emissions_factor_kgco2e_per_kwh"),
         grid_availability=_opt("grid_availability"),
         grid_import_price=_opt("grid_import_price"),
         grid_export_price=_opt("grid_export_price"),
