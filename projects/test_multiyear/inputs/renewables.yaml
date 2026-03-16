@@ -54,7 +54,7 @@ renewables:
     by_step:
       base:
         nominal_capacity_kw: 1.0
-        specific_investment_cost_per_kw: 800
+        specific_investment_cost_per_kw: 900
         wacc: 0.05
         grant_share_of_capex: 0.0
         lifetime_years: 25
