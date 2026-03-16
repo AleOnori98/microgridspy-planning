@@ -9,27 +9,15 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import xarray as xr
-import json
 
 from core.typical_year_model.model import SteadyStateModel
 from core.multi_year_model.model import MultiYearModel
 from core.export.results_bundle import build_results_bundle
 from core.io.utils import project_paths
+from core.visualization.page_helpers import get_dataset_settings, read_json_file
 
 class InputValidationError(RuntimeError):
     pass
-
-# -----------------------------------------------------------------------------
-# helpers
-# -----------------------------------------------------------------------------
-def _read_json(path: Path) -> Dict[str, Any]:
-    """Read and parse JSON file, raising InputValidationError on failure."""
-    if not path.exists():
-        raise InputValidationError(f"Missing required file: {path}")
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception as e:
-        raise InputValidationError(f"Cannot parse JSON: {path}\nerror: {e}")
 
 def _as_str(x: Any, *, name: str, default: str = "") -> str:
     """Convert x to str, with default if None. Raise InputValidationError on failure."""
@@ -73,6 +61,17 @@ KEYS = {
     "results_bundle": "gp_results_bundle",
 }
 
+RESULT_STATE_KEYS = (
+    KEYS["solution"],
+    KEYS["solution_summary"],
+    KEYS["sets"],
+    KEYS["data"],
+    KEYS["vars"],
+    KEYS["model_obj"],
+    KEYS["log_path"],
+    KEYS["results_bundle"],
+)
+
 
 def _init_defaults() -> None:
     defaults = {
@@ -97,6 +96,11 @@ def _init_defaults() -> None:
     for k, v in defaults.items():
         if k not in st.session_state or st.session_state[k] is None:
             st.session_state[k] = v
+
+
+def _reset_result_state() -> None:
+    for key in RESULT_STATE_KEYS:
+        st.session_state[key] = None
 
 
 # =============================================================================
@@ -183,23 +187,6 @@ def _safe_preview(values, n: int = 8):
             return str(values)
 
 
-def _get_settings(data_ds: Optional[xr.Dataset]) -> Dict[str, Any]:
-    """Safely read data.attrs['settings'] as a dict."""
-    if not isinstance(data_ds, xr.Dataset):
-        return {}
-    s = (data_ds.attrs or {}).get("settings", {})
-    return s if isinstance(s, dict) else {}
-
-
-def _get_flag(settings: Dict[str, Any], path: Tuple[str, ...], default: bool = False) -> bool:
-    cur: Any = settings
-    for k in path:
-        if not isinstance(cur, dict) or k not in cur:
-            return default
-        cur = cur[k]
-    return bool(cur)
-
-
 def _show_xr_dataset_debug(ds: xr.Dataset, title: str, coord_preview_n: int = 8) -> None:
     st.markdown(f"### {title}")
 
@@ -267,7 +254,7 @@ def _render_variables_debug(data_ds: Optional[xr.Dataset], vars_dict: Any) -> No
             st.warning("vars_dict is empty or not a dict.")
             return
 
-        settings = _get_settings(data_ds)
+        settings = get_dataset_settings(data_ds)
         uc_enabled = bool(settings.get("unit_commitment", False))
         st.caption(f"unit_commitment (from data.attrs['settings']): {uc_enabled}")
 
@@ -546,6 +533,39 @@ def _render_solver_log(log_path_value: Any) -> None:
         st.text_area("Log content", value=txt, height=260)
 
 
+def _build_model(project_name: str, formulation_mode: str) -> SteadyStateModel | MultiYearModel:
+    if formulation_mode == "steady_state":
+        return SteadyStateModel(project_name=project_name)
+    if formulation_mode == "dynamic":
+        return MultiYearModel(project_name=project_name)
+    raise InputValidationError(f"Unknown formulation '{formulation_mode}' in formulation.json")
+
+
+def _store_solve_outputs(
+    *,
+    model: SteadyStateModel | MultiYearModel,
+    solution: Any,
+    solver: str,
+    fallback_log_path: Path,
+) -> None:
+    st.session_state[KEYS["solution"]] = solution
+    st.session_state[KEYS["sets"]] = model.sets
+    st.session_state[KEYS["data"]] = model.data
+    st.session_state[KEYS["vars"]] = model.vars
+    st.session_state[KEYS["model_obj"]] = model
+    st.session_state[KEYS["log_path"]] = str(model._last_log_path) if model._last_log_path else str(fallback_log_path)
+    st.session_state[KEYS["solution_summary"]] = _extract_solution_summary(model)
+    st.session_state[KEYS["results_bundle"]] = build_results_bundle(
+        sets=model.sets,
+        data=model.data,
+        vars=model.vars,
+        model_obj=model,
+        solution=getattr(model.model, "solution", None) if model.model is not None else solution,
+        solution_summary=st.session_state[KEYS["solution_summary"]],
+        solver=solver,
+    )
+
+
 # =============================================================================
 # Page
 # =============================================================================
@@ -564,7 +584,11 @@ def render_generation_planning_optimization_page() -> None:
 
     # Retrieve project-specific formulation.json settings
     paths = project_paths(project_name)
-    formulation_json = _read_json(paths.formulation_json)
+    formulation_json = read_json_file(
+        paths.formulation_json,
+        error_cls=InputValidationError,
+        parse_prefix="Cannot parse JSON",
+    )
     formulation_mode = _as_str(formulation_json.get("core_formulation", "steady_state"), name="core_formulation")
 
     st.subheader("Solve Run")
@@ -667,41 +691,24 @@ def render_generation_planning_optimization_page() -> None:
     )
 
     if run_clicked and ok:
-        # reset
-        for k in (KEYS["solution"], KEYS["solution_summary"], KEYS["sets"], KEYS["data"], KEYS["vars"], KEYS["model_obj"], KEYS["log_path"], KEYS["results_bundle"]):
-            st.session_state[k] = None
+        _reset_result_state()
 
         t0 = time.time()
 
         with st.spinner(f"Building and solving project '{project_name}'..."):
-                
-                # Initialize model wrapper (which will lazily build the linopy model as needed based on the step)
-                if formulation_mode == "steady_state": m = SteadyStateModel(project_name=project_name)
-                elif formulation_mode == "dynamic": m = MultiYearModel(project_name=project_name)
-                else: raise InputValidationError(f"Unknown formulation '{formulation_mode}' in formulation.json")
-
-                sol = m.solve_single_objective(
-                    solver=solver,
-                    solver_params=params,
-                    problem_fn=lp_path if lp_path else None,
-                    log_file_path=log_path,
-                )
-                st.session_state[KEYS["solution"]] = sol
-                st.session_state[KEYS["sets"]] = m.sets
-                st.session_state[KEYS["data"]] = m.data
-                st.session_state[KEYS["vars"]] = m.vars
-                st.session_state[KEYS["model_obj"]] = m  # keep for debug
-                st.session_state[KEYS["log_path"]] = str(m._last_log_path) if m._last_log_path else str(log_path)
-                st.session_state[KEYS["solution_summary"]] = _extract_solution_summary(m)
-                st.session_state[KEYS["results_bundle"]] = build_results_bundle(
-                    sets=m.sets,
-                    data=m.data,
-                    vars=m.vars,
-                    model_obj=m,
-                    solution=getattr(m.model, "solution", None) if m.model is not None else sol,
-                    solution_summary=st.session_state[KEYS["solution_summary"]],
-                    solver=solver,
-                )
+            model = _build_model(project_name, formulation_mode)
+            solution = model.solve_single_objective(
+                solver=solver,
+                solver_params=params,
+                problem_fn=lp_path if lp_path else None,
+                log_file_path=log_path,
+            )
+            _store_solve_outputs(
+                model=model,
+                solution=solution,
+                solver=solver,
+                fallback_log_path=log_path,
+            )
 
         elapsed = time.time() - t0
         st.success(f"Solve completed. Runtime: {elapsed:.2f} s")

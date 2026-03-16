@@ -242,6 +242,14 @@ def write_formulation_file(*, project_name: str, project_description: str, cfg: 
         st.warning(f"Project initialized, but failed to write `{paths.formulation_json.name}`: {exc}")
 
 
+def _activate_project(project_name: str):
+    """Store the selected project in session state and return its resolved paths."""
+    st.session_state[K["active_project"]] = project_name
+    paths = project_paths(project_name)
+    st.session_state["project_path"] = str(paths.root)
+    return paths
+
+
 def create_or_overwrite_project(*, project_name: str, project_description: str, cfg: PageConfig) -> None:
     """
     Always generates/overwrites templates based on cfg.
@@ -252,10 +260,8 @@ def create_or_overwrite_project(*, project_name: str, project_description: str, 
         st.error("Please provide a project name before continuing.")
         return
 
-    st.session_state[K["active_project"]] = project_name
-
-    paths = ensure_project_structure(project_name)
-    st.session_state["project_path"] = str(paths.root)
+    ensure_project_structure(project_name)
+    paths = _activate_project(project_name)
 
     # Always rewrite formulation.json to match current UI config
     write_formulation_file(project_name=project_name, project_description=project_description, cfg=cfg)
@@ -295,9 +301,7 @@ def load_project(*, project_name: str) -> None:
         st.error("Selected project does not exist.")
         return
 
-    st.session_state[K["active_project"]] = project_name
-    paths = project_paths(project_name)
-    st.session_state["project_path"] = str(paths.root)
+    paths = _activate_project(project_name)
     st.success(f"Project loaded: {paths.root}")
     st.info("No files were modified. Proceed to fill/validate/run using the existing project inputs.")
 

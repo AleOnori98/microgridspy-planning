@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
-import json
 
 import numpy as np
 import pandas as pd
@@ -15,6 +14,7 @@ from core.export.yaml_reader import read_yaml
 from core.io.utils import project_paths
 from core.multi_year_model.sets import initialize_sets as initialize_multi_year_sets
 from core.typical_year_model.sets import initialize_sets as initialize_typical_year_sets
+from core.visualization.page_helpers import read_json_file, resolve_active_project_from_session
 from core.visualization.input_plots import (
     build_timeseries_figures,
     compute_series_stats,
@@ -130,30 +130,6 @@ STATIC_PARAMETER_METADATA: Dict[str, Dict[str, str]] = {
         "source": "generator_efficiency_curve.csv",
     },
 }
-
-
-def _read_json(path: Path) -> Dict[str, Any]:
-    if not path.exists():
-        raise RuntimeError(f"Missing required file: {path}")
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        raise RuntimeError(f"Cannot parse JSON file: {path}\nerror: {exc}") from exc
-
-
-def _resolve_active_project() -> Tuple[str, Path]:
-    if "project_path" not in st.session_state:
-        st.warning("Please create or load a project first.")
-        st.stop()
-
-    project_root = Path(str(st.session_state["project_path"]))
-    if not project_root.exists():
-        st.error(f"Configured project path does not exist: {project_root}")
-        st.stop()
-
-    project_name = project_root.name
-    st.session_state["active_project"] = project_name
-    return project_name, project_root
 
 
 def _build_file_table(paths, files: Dict[str, str]) -> pd.DataFrame:
@@ -397,13 +373,34 @@ def _render_file_section(project_root: Path, formulation: Dict[str, Any], paths)
 
 
 def _render_dataset_section(ds: xr.Dataset, loader_mode: str, paths) -> None:
-    st.subheader("Section B - Dataset Loading + Summary")
+    st.subheader("Section B - Dataset Summary")
     st.caption("Load the canonical dataset through the shared pipeline and inspect its structure before optimization.")
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Loader mode", loader_mode)
     c2.metric("Dimensions", len(ds.sizes))
     c3.metric("Parameters", len(ds.data_vars))
+
+    settings = (ds.attrs or {}).get("settings", {})
+    if loader_mode == "multi_year" and isinstance(settings, dict):
+        st.markdown("**Multi-Year Settings**")
+        horizon_years = ds.sizes.get("year", 0)
+        raw_discount = settings.get("social_discount_rate", None)
+        try:
+            discount_pct = f"{100.0 * float(raw_discount):.2f}%"
+        except Exception:
+            discount_pct = "n/a"
+
+        inv_steps = settings.get("investment_steps", None)
+        if isinstance(inv_steps, list):
+            n_steps = len(inv_steps)
+        else:
+            n_steps = int(ds.sizes.get("inv_step", 0))
+
+        c4, c5, c6 = st.columns(3)
+        c4.metric("Time horizon", f"{int(horizon_years)} years")
+        c5.metric("Investment steps", str(int(n_steps)))
+        c6.metric("Social discount rate", discount_pct)
 
     st.markdown("**Coordinates**")
     st.dataframe(_coordinates_summary(ds), width="stretch", hide_index=True)
@@ -603,11 +600,11 @@ def render_page() -> None:
     st.title("Data Audit and Visualization")
     st.caption("Validate project inputs, load the canonical dataset, and inspect time-series data before optimization.")
 
-    project_name, project_root = _resolve_active_project()
+    project_name, project_root = resolve_active_project_from_session()
     paths = project_paths(project_name)
 
     try:
-        formulation = _read_json(paths.formulation_json)
+        formulation = read_json_file(paths.formulation_json)
     except Exception as exc:
         st.error(f"Cannot read `formulation.json`: {exc}")
         st.stop()
