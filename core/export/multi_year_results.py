@@ -124,6 +124,45 @@ def _crf(r: xr.DataArray | float, n: xr.DataArray | float) -> xr.DataArray:
     return xr.where(nn > 0, out, 0.0)
 
 
+def _as_year_scenario_da(x: Any, sets: xr.Dataset) -> xr.DataArray:
+    year = sets.coords["year"]
+    scenario = sets.coords["scenario"]
+    if isinstance(x, xr.DataArray):
+        da = x
+    else:
+        da = xr.DataArray(float(safe_float(x)))
+    if "year" not in da.dims:
+        da = da.expand_dims(year=year)
+    else:
+        da = da.sel(year=year)
+    if "scenario" not in da.dims:
+        da = da.expand_dims(scenario=scenario)
+    else:
+        da = da.sel(scenario=scenario)
+    ordered_dims = ["year", "scenario"] + [dim for dim in da.dims if dim not in {"year", "scenario"}]
+    return da.transpose(*ordered_dims)
+
+
+def _append_expected_rows(df: pd.DataFrame, *, numeric_cols: list[str]) -> pd.DataFrame:
+    if df.empty:
+        return df
+    expected_rows = []
+    for year, group in df.groupby("year", sort=False):
+        row = {"year": year, "scenario": "Expected", "weight": 1.0}
+        weights = group["weight"].to_numpy(dtype=float)
+        for col in numeric_cols:
+            row[col] = float(np.sum(group[col].to_numpy(dtype=float) * weights))
+        expected_rows.append(row)
+    return pd.concat([df, pd.DataFrame(expected_rows)], ignore_index=True)
+
+
+def _scalar_float(x: Any) -> float:
+    if isinstance(x, xr.DataArray):
+        values = np.asarray(x.values, dtype=float).reshape(-1)
+        return float(values[0]) if values.size else float("nan")
+    return float(safe_float(x))
+
+
 def build_dispatch_timeseries_table_multi_year(
     *,
     data: xr.Dataset,
@@ -443,6 +482,142 @@ def build_discounted_cashflows_table_multi_year(
     return pd.DataFrame(rows)
 
 
+def build_scenario_costs_table_multi_year(
+    *,
+    sets: xr.Dataset,
+    data: xr.Dataset,
+    vars: Dict[str, Any],
+    solution: Optional[xr.Dataset],
+) -> pd.DataFrame:
+    p = get_params(data)
+    weights = _scenario_weights(p, sets.coords["scenario"])
+
+    res_units = require_data_array("res_units", get_var_solution(vars_dict=vars, solution=solution, name="res_units"))
+    bat_units = require_data_array("battery_units", get_var_solution(vars_dict=vars, solution=solution, name="battery_units"))
+    gen_units = require_data_array("generator_units", get_var_solution(vars_dict=vars, solution=solution, name="generator_units"))
+    res_gen = require_data_array("res_generation", get_var_solution(vars_dict=vars, solution=solution, name="res_generation"))
+    fuel_cons = require_data_array("fuel_consumption", get_var_solution(vars_dict=vars, solution=solution, name="fuel_consumption"))
+    lost_load = require_data_array("lost_load", get_var_solution(vars_dict=vars, solution=solution, name="lost_load"))
+
+    grid_imp = get_var_solution(vars_dict=vars, solution=solution, name="grid_import")
+    grid_exp = get_var_solution(vars_dict=vars, solution=solution, name="grid_export")
+
+    res_nom = require_data_array("res_nominal_capacity_kw", p.res_nominal_capacity_kw)
+    res_capex = require_data_array("res_specific_investment_cost_per_kw", p.res_specific_investment_cost_per_kw)
+    res_grant = require_data_array("res_grant_share_of_capex", p.res_grant_share_of_capex)
+    bat_nom = require_data_array("battery_nominal_capacity_kwh", p.battery_nominal_capacity_kwh)
+    bat_capex = require_data_array("battery_specific_investment_cost_per_kwh", p.battery_specific_investment_cost_per_kwh)
+    gen_nom = require_data_array("generator_nominal_capacity_kw", p.generator_nominal_capacity_kw)
+    gen_capex = require_data_array("generator_specific_investment_cost_per_kw", p.generator_specific_investment_cost_per_kw)
+
+    fuel_price = p.fuel_cost_per_unit_fuel if p.fuel_cost_per_unit_fuel is not None else p.fuel_fuel_cost_per_unit_fuel
+    fuel_cost_y_s = _as_year_scenario_da((fuel_cons * fuel_price).sum("period"), sets) if fuel_price is not None else _as_year_scenario_da(0.0, sets)
+    grid_import_cost_y_s = _as_year_scenario_da((grid_imp * p.grid_import_price).sum("period"), sets) if (p.is_grid_on() and isinstance(grid_imp, xr.DataArray) and p.grid_import_price is not None) else _as_year_scenario_da(0.0, sets)
+    grid_export_rev_y_s = _as_year_scenario_da((grid_exp * p.grid_export_price).sum("period"), sets) if (p.is_grid_export_enabled() and isinstance(grid_exp, xr.DataArray) and p.grid_export_price is not None) else _as_year_scenario_da(0.0, sets)
+
+    res_subsidy_y_s = _as_year_scenario_da(0.0, sets)
+    if p.res_production_subsidy_per_kwh is not None:
+        subsidy = p.res_production_subsidy_per_kwh
+        if "inv_step" in subsidy.dims:
+            subsidy = subsidy.isel(inv_step=0, drop=True)
+        res_subsidy_y_s = _as_year_scenario_da((res_gen * subsidy).sum("period").sum("resource"), sets)
+
+    res_inv = res_units * res_nom * res_capex * (1.0 - res_grant)
+    bat_inv = bat_units * bat_nom * bat_capex
+    gen_inv = gen_units * gen_nom * gen_capex
+    active = replacement_active_mask(sets)
+
+    res_fom_share = p.res_fixed_om_share_per_year if p.res_fixed_om_share_per_year is not None else 0.0
+    bat_fom_share = p.battery_fixed_om_share_per_year if p.battery_fixed_om_share_per_year is not None else 0.0
+    gen_fom_share = p.generator_fixed_om_share_per_year if p.generator_fixed_om_share_per_year is not None else 0.0
+
+    fixed_om_res_y_s = _as_year_scenario_da((res_inv * res_fom_share * active).sum("inv_step").sum("resource"), sets)
+    fixed_om_battery_y_s = _as_year_scenario_da((bat_inv * bat_fom_share * active).sum("inv_step"), sets)
+    fixed_om_generator_y_s = _as_year_scenario_da((gen_inv * gen_fom_share * active).sum("inv_step"), sets)
+
+    lost_load_cost_y_s = _as_year_scenario_da(lost_load.sum("period") * p.lost_load_cost_per_kwh, sets) if p.lost_load_cost_per_kwh is not None else _as_year_scenario_da(0.0, sets)
+
+    scope1_y_s = _as_year_scenario_da(fuel_cons.sum("period") * p.fuel_direct_emissions_kgco2e_per_unit_fuel, sets) if p.fuel_direct_emissions_kgco2e_per_unit_fuel is not None else _as_year_scenario_da(0.0, sets)
+    scope2_y_s = _as_year_scenario_da(0.0, sets)
+    if p.is_grid_on() and isinstance(grid_imp, xr.DataArray) and p.grid_transmission_efficiency is not None and p.grid_emissions_factor_kgco2e_per_kwh is not None:
+        scope2_y_s = _as_year_scenario_da((grid_imp * p.grid_transmission_efficiency).sum("period") * p.grid_emissions_factor_kgco2e_per_kwh, sets)
+
+    commission_res = replacement_commission_mask(sets, require_data_array("res_lifetime_years", p.res_lifetime_years))
+    commission_bat = replacement_commission_mask(sets, require_data_array("battery_calendar_lifetime_years", p.battery_calendar_lifetime_years))
+    commission_gen = replacement_commission_mask(sets, require_data_array("generator_lifetime_years", p.generator_lifetime_years))
+
+    scope3_res_y = _as_year_scenario_da(
+        (res_units * res_nom * p.res_embedded_emissions_kgco2e_per_kw * commission_res).sum("inv_step").sum("resource"),
+        sets,
+    ) if p.res_embedded_emissions_kgco2e_per_kw is not None else _as_year_scenario_da(0.0, sets)
+    scope3_battery_y = _as_year_scenario_da(
+        (bat_units * bat_nom * p.battery_embedded_emissions_kgco2e_per_kwh * commission_bat).sum("inv_step"),
+        sets,
+    ) if p.battery_embedded_emissions_kgco2e_per_kwh is not None else _as_year_scenario_da(0.0, sets)
+    scope3_generator_y = _as_year_scenario_da(
+        (gen_units * gen_nom * p.generator_embedded_emissions_kgco2e_per_kw * commission_gen).sum("inv_step"),
+        sets,
+    ) if p.generator_embedded_emissions_kgco2e_per_kw is not None else _as_year_scenario_da(0.0, sets)
+    scope3_y_s = scope3_res_y + scope3_battery_y + scope3_generator_y
+
+    emission_cost_y_s = _as_year_scenario_da(p.emission_cost_per_kgco2e, sets) if p.emission_cost_per_kgco2e is not None else _as_year_scenario_da(0.0, sets)
+    scope1_cost_y_s = scope1_y_s * emission_cost_y_s
+    scope2_cost_y_s = scope2_y_s * emission_cost_y_s
+    scope3_res_cost_y_s = scope3_res_y * emission_cost_y_s
+    scope3_battery_cost_y_s = scope3_battery_y * emission_cost_y_s
+    scope3_generator_cost_y_s = scope3_generator_y * emission_cost_y_s
+    emissions_cost_y_s = scope1_cost_y_s + scope2_cost_y_s + scope3_res_cost_y_s + scope3_battery_cost_y_s + scope3_generator_cost_y_s
+
+    variable_cost_y_s = fuel_cost_y_s + grid_import_cost_y_s - grid_export_rev_y_s - res_subsidy_y_s
+    total_operating_cost_y_s = (
+        variable_cost_y_s
+        + fixed_om_res_y_s
+        + fixed_om_battery_y_s
+        + fixed_om_generator_y_s
+        + lost_load_cost_y_s
+        + emissions_cost_y_s
+    )
+
+    rows = []
+    for year in sets.coords["year"].values:
+        for scenario in sets.coords["scenario"].values:
+            rows.append(
+                {
+                    "year": str(year),
+                    "scenario": str(scenario),
+                    "weight": float(weights.sel(scenario=scenario)),
+                    "fuel_cost": _scalar_float(fuel_cost_y_s.sel(year=year, scenario=scenario)),
+                    "grid_import_cost": _scalar_float(grid_import_cost_y_s.sel(year=year, scenario=scenario)),
+                    "grid_export_revenue": _scalar_float(grid_export_rev_y_s.sel(year=year, scenario=scenario)),
+                    "res_subsidy_revenue": _scalar_float(res_subsidy_y_s.sel(year=year, scenario=scenario)),
+                    "annual_variable_cost": _scalar_float(variable_cost_y_s.sel(year=year, scenario=scenario)),
+                    "fixed_om_res": _scalar_float(fixed_om_res_y_s.sel(year=year, scenario=scenario)),
+                    "fixed_om_battery": _scalar_float(fixed_om_battery_y_s.sel(year=year, scenario=scenario)),
+                    "fixed_om_generator": _scalar_float(fixed_om_generator_y_s.sel(year=year, scenario=scenario)),
+                    "fixed_om_total": _scalar_float((fixed_om_res_y_s + fixed_om_battery_y_s + fixed_om_generator_y_s).sel(year=year, scenario=scenario)),
+                    "lost_load_penalty": _scalar_float(lost_load_cost_y_s.sel(year=year, scenario=scenario)),
+                    "scope1_emissions": _scalar_float(scope1_y_s.sel(year=year, scenario=scenario)),
+                    "scope2_emissions": _scalar_float(scope2_y_s.sel(year=year, scenario=scenario)),
+                    "scope3_res_emissions": _scalar_float(scope3_res_y.sel(year=year, scenario=scenario)),
+                    "scope3_battery_emissions": _scalar_float(scope3_battery_y.sel(year=year, scenario=scenario)),
+                    "scope3_generator_emissions": _scalar_float(scope3_generator_y.sel(year=year, scenario=scenario)),
+                    "scope3_emissions": _scalar_float(scope3_y_s.sel(year=year, scenario=scenario)),
+                    "total_emissions": _scalar_float((scope1_y_s + scope2_y_s + scope3_y_s).sel(year=year, scenario=scenario)),
+                    "scope1_emissions_cost": _scalar_float(scope1_cost_y_s.sel(year=year, scenario=scenario)),
+                    "scope2_emissions_cost": _scalar_float(scope2_cost_y_s.sel(year=year, scenario=scenario)),
+                    "scope3_res_emissions_cost": _scalar_float(scope3_res_cost_y_s.sel(year=year, scenario=scenario)),
+                    "scope3_battery_emissions_cost": _scalar_float(scope3_battery_cost_y_s.sel(year=year, scenario=scenario)),
+                    "scope3_generator_emissions_cost": _scalar_float(scope3_generator_cost_y_s.sel(year=year, scenario=scenario)),
+                    "emissions_cost": _scalar_float(emissions_cost_y_s.sel(year=year, scenario=scenario)),
+                    "total_operating_cost": _scalar_float(total_operating_cost_y_s.sel(year=year, scenario=scenario)),
+                }
+            )
+
+    scenario_df = pd.DataFrame(rows)
+    numeric_cols = [col for col in scenario_df.columns if col not in {"year", "scenario", "weight"}]
+    return _append_expected_rows(scenario_df, numeric_cols=numeric_cols)
+
+
 def export_multi_year_results(
     project_name: str,
     sets: xr.Dataset,
@@ -466,6 +641,7 @@ def export_multi_year_results(
     design = build_design_by_step_table_multi_year(sets=sets, data=data, vars=vars, solution=solution)
     kpis = build_yearly_kpis_table_multi_year(data=data, vars=vars, solution=solution, objective_value=obj)
     cash = build_discounted_cashflows_table_multi_year(sets=sets, data=data, vars=vars, solution=solution)
+    scenario_costs = build_scenario_costs_table_multi_year(sets=sets, data=data, vars=vars, solution=solution)
     written = write_csv_outputs(
         out_dir,
         {
@@ -474,6 +650,7 @@ def export_multi_year_results(
             "design_by_step.csv": design,
             "kpis_yearly.csv": kpis,
             "cashflows_discounted.csv": cash,
+            "scenario_costs_yearly.csv": scenario_costs,
         },
     )
 

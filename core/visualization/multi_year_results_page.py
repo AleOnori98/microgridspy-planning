@@ -10,7 +10,7 @@ import streamlit as st
 import xarray as xr
 
 from core.export.common import get_var_solution, require_data_array, safe_float
-from core.export.results_page_helpers import export_results_from_bundle
+from core.export.results_page_helpers import MultiYearFileResults, export_results_from_bundle
 from core.export.multi_year_results import (
     build_design_by_step_table_multi_year,
     build_discounted_cashflows_table_multi_year,
@@ -51,6 +51,8 @@ class MultiYearResultsContext:
     allow_export: bool
     years: list[str]
     scenarios: list[str]
+    file_backed: bool = False
+    results_dir: Optional[str] = None
 
 
 def _get_settings(data: xr.Dataset) -> Dict[str, Any]:
@@ -228,6 +230,72 @@ def _scalar_float(x: Any) -> float:
         values = np.asarray(x.values, dtype=float).reshape(-1)
         return float(values[0]) if values.size else float("nan")
     return float(safe_float(x))
+
+
+def _scalar_param(x: Any, **indexers: Any) -> float:
+    if not isinstance(x, xr.DataArray):
+        return float(safe_float(x))
+    da = x
+    valid_indexers = {k: v for k, v in indexers.items() if k in da.dims}
+    if valid_indexers:
+        da = da.sel(**valid_indexers)
+    extra_dims = [d for d in da.dims if da.sizes.get(d, 1) > 1]
+    if extra_dims:
+        da = da.isel({d: 0 for d in extra_dims})
+    return _scalar_float(da)
+
+
+def _build_investment_summary_from_design(*, sets: xr.Dataset, data: xr.Dataset, design_df: pd.DataFrame) -> pd.DataFrame:
+    p = get_params(data)
+    rs = float((p.settings.get("social_discount_rate", 0.0) or 0.0))
+    years = [str(y) for y in sets.coords["year"].values.tolist()]
+    start_year_map = {str(step): str(sets["inv_step_start_year"].sel(inv_step=step).item()) for step in sets.coords["inv_step"].values} if "inv_step_start_year" in sets else {}
+    year_to_ordinal = {year: idx for idx, year in enumerate(years)}
+
+    rows = []
+    for _, row in design_df.iterrows():
+        technology = str(row.get("technology", "")).strip().lower()
+        inv_step = str(row.get("inv_step", ""))
+        resource = str(row.get("resource", "")).strip()
+        installed_capacity = float(pd.to_numeric(pd.Series([row.get("installed_capacity", 0.0)]), errors="coerce").fillna(0.0).iloc[0])
+        if installed_capacity == 0.0:
+            continue
+        start_year = str(row.get("inv_step_start_year", start_year_map.get(inv_step, years[0] if years else "")))
+        discount_factor = 1.0 / ((1.0 + rs) ** year_to_ordinal.get(start_year, 0))
+
+        if technology == "renewable":
+            capex = _scalar_param(p.res_specific_investment_cost_per_kw, inv_step=inv_step, resource=resource)
+            grant = _scalar_param(p.res_grant_share_of_capex, inv_step=inv_step, resource=resource)
+            nominal = installed_capacity * capex * (1.0 - grant)
+            label = resource
+            unit = "kW"
+        elif technology == "battery":
+            capex = _scalar_param(p.battery_specific_investment_cost_per_kwh, inv_step=inv_step)
+            nominal = installed_capacity * capex
+            label = "Battery"
+            unit = "kWh"
+        elif technology == "generator":
+            capex = _scalar_param(p.generator_specific_investment_cost_per_kw, inv_step=inv_step)
+            nominal = installed_capacity * capex
+            label = "Generator"
+            unit = "kW"
+        else:
+            continue
+
+        rows.append(
+            {
+                "Technology": label,
+                "Capacity unit": unit,
+                "Nominal investment cost": nominal,
+                "Present-value investment cost": nominal * discount_factor,
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame(columns=["Technology", "Capacity unit", "Nominal investment cost", "Present-value investment cost"])
+
+    out = pd.DataFrame(rows)
+    return out.groupby(["Technology", "Capacity unit"], as_index=False)[["Nominal investment cost", "Present-value investment cost"]].sum()
 
 
 def _build_investment_summary(
@@ -487,6 +555,64 @@ def _build_context(bundle: ResultsBundle) -> MultiYearResultsContext:
         allow_export=bool(((settings.get("grid", {}) or {}).get("allow_export", False))),
         years=[str(y) for y in sets.coords["year"].values.tolist()],
         scenarios=[str(s) for s in sets.coords["scenario"].values.tolist()],
+    )
+
+
+def _build_context_from_files(file_results: MultiYearFileResults) -> MultiYearResultsContext:
+    data = file_results.data
+    sets = file_results.sets
+    settings = _get_settings(data)
+    dispatch = file_results.dispatch.copy()
+    design = file_results.design.copy()
+    kpis = file_results.kpis.copy()
+    cash = file_results.cash.copy()
+    scenario_costs = file_results.scenario_costs.copy()
+
+    for frame in (dispatch, design, kpis, cash, scenario_costs):
+        if "year" in frame.columns:
+            frame["year"] = frame["year"].astype(str)
+        if "scenario" in frame.columns:
+            frame["scenario"] = frame["scenario"].astype(str)
+        if "inv_step" in frame.columns:
+            frame["inv_step"] = frame["inv_step"].astype(str)
+        if "inv_step_start_year" in frame.columns:
+            frame["inv_step_start_year"] = frame["inv_step_start_year"].astype(str)
+
+    capacity = _capacity_by_year(sets, design)
+    yearly_expected = _build_yearly_expected(cash, scenario_costs)
+    investment_summary = _build_investment_summary_from_design(sets=sets, data=data, design_df=design)
+    objective_value = float(safe_float(cash["discounted_objective_contribution"].sum())) if "discounted_objective_contribution" in cash.columns else None
+    bundle = ResultsBundle(
+        formulation_mode="dynamic",
+        sets=sets,
+        data=data,
+        vars=None,
+        solution=None,
+        objective_value=objective_value,
+        status=None,
+        metadata={"source": "files"},
+    )
+    return MultiYearResultsContext(
+        bundle=bundle,
+        data=data,
+        sets=sets,
+        settings=settings,
+        vars_dict={},
+        solution=None,
+        dispatch=dispatch,
+        design=design,
+        kpis=kpis,
+        cash=cash,
+        capacity_by_year=capacity,
+        yearly_expected=yearly_expected,
+        scenario_costs=scenario_costs,
+        investment_summary=investment_summary,
+        on_grid=bool(((settings.get("grid", {}) or {}).get("on_grid", False))),
+        allow_export=bool(((settings.get("grid", {}) or {}).get("allow_export", False))),
+        years=[str(y) for y in sets.coords["year"].values.tolist()],
+        scenarios=[str(s) for s in sets.coords["scenario"].values.tolist()],
+        file_backed=True,
+        results_dir=str(file_results.results_dir),
     )
 
 
@@ -898,6 +1024,11 @@ def _render_scenario_costs_and_emissions(ctx: MultiYearResultsContext) -> None:
 
 def _render_export_section(ctx: MultiYearResultsContext, project_name: Optional[str]) -> None:
     st.subheader("Export Results")
+    if ctx.file_backed:
+        st.caption("Displaying saved results loaded from project files.")
+        if ctx.results_dir:
+            st.write(ctx.results_dir)
+        return
     st.caption("Export multi-year results to CSV and an Excel workbook with one sheet per model year.")
 
     if st.button("Export results to CSV / Excel", type="primary", key="my_results_export"):
@@ -905,8 +1036,9 @@ def _render_export_section(ctx: MultiYearResultsContext, project_name: Optional[
             st.error("Active project name is missing; cannot export results.")
             return
         try:
-            model_obj = st.session_state.get("gp_model_obj")
-            written = export_results_from_bundle(project_name, ctx.bundle, model_obj=model_obj)
+            with st.spinner("Exporting multi-year results..."):
+                model_obj = st.session_state.get("gp_model_obj")
+                written = export_results_from_bundle(project_name, ctx.bundle, model_obj=model_obj)
             st.success("Export completed.")
             st.json(written)
             st.markdown("**Generated files**")
@@ -925,6 +1057,23 @@ def render_multi_year_results(bundle: ResultsBundle, project_name: Optional[str]
         st.error(f"Unable to render multi-year results: {exc}")
         return
 
+    _render_sizing_summary(ctx)
+    _render_performance_kpis(ctx)
+    _render_energy_mix(ctx)
+    _render_costs_and_cashflow(ctx)
+    _render_scenario_costs_and_emissions(ctx)
+    _render_export_section(ctx, project_name)
+
+
+def render_multi_year_results_from_files(file_results: MultiYearFileResults, project_name: Optional[str]) -> None:
+    _ = project_name
+    try:
+        ctx = _build_context_from_files(file_results)
+    except Exception as exc:
+        st.error(f"Unable to render saved multi-year results: {exc}")
+        return
+
+    st.info(f"Displaying saved results loaded from project files in `{file_results.results_dir}`.")
     _render_sizing_summary(ctx)
     _render_performance_kpis(ctx)
     _render_energy_mix(ctx)
