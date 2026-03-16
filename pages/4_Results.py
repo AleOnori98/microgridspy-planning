@@ -228,7 +228,7 @@ def _render_energy_balance_check(bundle: ResultsBundle, tolerance: float = 1e-6)
         else:
             st.success(f"Residual within tolerance {tolerance:.1e}")
 
-        st.dataframe(eb, use_container_width=True)
+        st.dataframe(eb, width="stretch")
 
 
 def render_generation_planning_results_page() -> None:
@@ -323,7 +323,7 @@ def render_generation_planning_results_page() -> None:
 
     st.dataframe(
         df_size.style.format({"Installed units": "{:,.3g}", "Capacity": "{:,.3g}"}).hide(axis="index"),
-        use_container_width=True,
+        width="stretch",
     )
 
     with st.expander("Per-renewable breakdown", expanded=False):
@@ -336,7 +336,7 @@ def render_generation_planning_results_page() -> None:
         )
         st.dataframe(
             df_res.style.format({"Installed units": "{:,.3g}", "Capacity [kW]": "{:,.3g}"}).hide(axis="index"),
-            use_container_width=True,
+            width="stretch",
         )
 
     # -----------------------------------------------------------------------------
@@ -442,7 +442,7 @@ def render_generation_planning_results_page() -> None:
 
         st.dataframe(
             kpi_df.style.format({"Value": "{:,.2f}"}).hide(axis="index"),
-            use_container_width=True,
+            width="stretch",
         )
 
     st.markdown("---")
@@ -527,7 +527,7 @@ def render_generation_planning_results_page() -> None:
         title_suffix=title_suffix,
     )
 
-    st.pyplot(fig, use_container_width=True)
+    st.pyplot(fig, width="stretch")
     _render_energy_balance_check(bundle, tolerance=1e-6)
 
     # -------------------------------------------------------------------------
@@ -840,7 +840,7 @@ def render_generation_planning_results_page() -> None:
             "Upfront gross [thousand]": "{:,.0f}",
             "Upfront net [thousand]": "{:,.0f}",
         }).hide(axis="index"),
-        use_container_width=True,
+        width="stretch",
     )
 
     # ======================================================
@@ -863,7 +863,7 @@ def render_generation_planning_results_page() -> None:
 
     st.dataframe(
         df_cost.style.format({"Value": "{:,.0f}"}).hide(axis="index"),
-        use_container_width=True,
+        width="stretch",
     )
 
     # ======================================================
@@ -879,7 +879,7 @@ def render_generation_planning_results_page() -> None:
     )
     st.dataframe(
         df_fom.style.format({"Annual FOM [/yr]": "{:,.0f}"}).hide(axis="index"),
-        use_container_width=True,
+        width="stretch",
     )
 
     # ======================================================
@@ -898,7 +898,7 @@ def render_generation_planning_results_page() -> None:
     df_ann = pd.DataFrame(rows)
     st.dataframe(
         df_ann.style.format({"Annuity [/yr]": "{:,.0f}"}).hide(axis="index"),
-        use_container_width=True,
+        width="stretch",
     )
 
     # --------------------------------------------------
@@ -979,7 +979,7 @@ def render_generation_planning_results_page() -> None:
             "Embodied Emissions [kg/yr]": "{:,.0f}",
             "Embodied Cost [/yr]": "{:,.0f}",
         }).hide(axis="index"),
-        use_container_width=True,
+        width="stretch",
     )
 
     # ======================================================
@@ -1032,7 +1032,7 @@ def render_generation_planning_results_page() -> None:
                 "Annual variable cost": "{:,.0f}",
                 "Weight": "{:.3f}",
             }).hide(axis="index"),
-            use_container_width=True,
+            width="stretch",
         )
 
     df_emissions_breakdown = pd.DataFrame({
@@ -1054,7 +1054,7 @@ def render_generation_planning_results_page() -> None:
                 "Emissions cost": "{:,.0f}",
                 "Weight": "{:.3f}",
             }).hide(axis="index"),
-            use_container_width=True,
+            width="stretch",
         )
 
     # ======================================================
@@ -1095,7 +1095,7 @@ def render_generation_planning_results_page() -> None:
                 "Total operating cost": "{:,.0f}",
                 "Weight": "{:.3f}",
             }).hide(axis="index"),
-            use_container_width=True,
+            width="stretch",
         )
 
     # ======================================================

@@ -12,6 +12,7 @@ from core.data_pipeline.loader import load_project_dataset
 from core.data_pipeline.typical_year_loader import regenerate_grid_availability_typical_year
 from core.export.yaml_reader import read_yaml
 from core.io.utils import project_paths
+from core.multi_year_model.data import regenerate_grid_availability_dynamic
 from core.multi_year_model.sets import initialize_sets as initialize_multi_year_sets
 from core.typical_year_model.sets import initialize_sets as initialize_typical_year_sets
 from core.visualization.page_helpers import read_json_file, resolve_active_project_from_session
@@ -410,8 +411,9 @@ def _render_dataset_section(ds: xr.Dataset, loader_mode: str, paths) -> None:
     _render_soft_check_warnings(ds)
 
 
-def _render_typical_year_grid_controls(project_name: str, formulation: Dict[str, Any], ds: xr.Dataset, paths) -> None:
-    if str(formulation.get("core_formulation", "steady_state")).strip() != "steady_state":
+def _render_grid_controls(project_name: str, formulation: Dict[str, Any], ds: xr.Dataset, paths) -> None:
+    formulation_mode = str(formulation.get("core_formulation", "steady_state")).strip()
+    if formulation_mode not in {"steady_state", "dynamic"}:
         return
     if not bool(formulation.get("on_grid", False)):
         return
@@ -435,41 +437,68 @@ def _render_typical_year_grid_controls(project_name: str, formulation: Dict[str,
     for scenario, block in by_scenario.items():
         line = (block.get("line", {}) or {})
         outages = (block.get("outages", {}) or {})
-        rows.append(
-            {
-                "scenario": scenario,
-                "line_capacity_kw": line.get("capacity_kw"),
-                "transmission_efficiency": line.get("transmission_efficiency"),
-                "renewable_share": line.get("renewable_share", 0.0),
-                "emissions_factor_kgco2e_per_kwh": line.get("emissions_factor_kgco2e_per_kwh", 0.0),
-                "avg_outages_per_year": outages.get("average_outages_per_year"),
-                "avg_outage_duration_minutes": outages.get("average_outage_duration_minutes"),
-                "outage_scale_od_hours": outages.get("outage_scale_od_hours"),
-                "outage_shape_od": outages.get("outage_shape_od"),
-                "outage_seed": outages.get("outage_seed", 0),
-            }
-        )
+        row = {
+            "scenario": scenario,
+            "line_capacity_kw": line.get("capacity_kw"),
+            "transmission_efficiency": line.get("transmission_efficiency"),
+            "renewable_share": line.get("renewable_share", 0.0),
+            "emissions_factor_kgco2e_per_kwh": line.get("emissions_factor_kgco2e_per_kwh", 0.0),
+            "avg_outages_per_year": outages.get("average_outages_per_year"),
+            "avg_outage_duration_minutes": outages.get("average_outage_duration_minutes"),
+            "outage_scale_od_hours": outages.get("outage_scale_od_hours"),
+            "outage_shape_od": outages.get("outage_shape_od"),
+            "outage_seed": outages.get("outage_seed", 0),
+        }
+        if formulation_mode == "dynamic":
+            row["first_year_connection"] = block.get("first_year_connection")
+        rows.append(row)
 
     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
-    c1, c2 = st.columns([1.2, 1.8])
-    with c1:
-        st.caption(f"Derived file: `{grid_csv_path.name}`")
-        if grid_csv_path.exists():
-            st.caption(f"Last updated: {pd.Timestamp(grid_csv_path.stat().st_mtime, unit='s')}")
-        if st.button("Regenerate grid availability from grid.yaml", key="regen_typical_grid"):
-            try:
+    st.caption(f"Derived file: `{grid_csv_path.name}`")
+    if grid_csv_path.exists():
+        st.caption(f"Last updated: {pd.Timestamp(grid_csv_path.stat().st_mtime, unit='s')}")
+    if st.button("Regenerate grid availability from grid.yaml", key=f"regen_grid_{formulation_mode}", type="primary"):
+        try:
+            if formulation_mode == "dynamic":
+                sets = initialize_multi_year_sets(project_name)
+                regenerate_grid_availability_dynamic(project_name=project_name, sets=sets)
+            else:
                 sets = initialize_typical_year_sets(project_name)
                 regenerate_grid_availability_typical_year(project_name=project_name, sets=sets)
-                st.success("grid_availability.csv regenerated from grid.yaml.")
-                st.rerun()
-            except Exception as exc:
-                st.error(f"Regeneration failed: {exc}")
-    with c2:
-        if "grid_availability" in ds:
-            availability = ds["grid_availability"]
-            availability_values = np.asarray(availability.values, dtype=float)
-            unavailable_hours = int(np.sum(availability_values < 0.5))
+            st.success("grid_availability.csv regenerated from grid.yaml.")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Regeneration failed: {exc}")
+
+    if "grid_availability" in ds:
+        availability = ds["grid_availability"]
+        availability_values = np.asarray(availability.values, dtype=float)
+        unavailable_hours = int(np.sum(availability_values < 0.5))
+        if "year" in availability.dims:
+            preview_rows = []
+            for scenario in availability.coords["scenario"].values.tolist():
+                for year in availability.coords["year"].values.tolist():
+                    series = availability.sel(scenario=scenario, year=year)
+                    connected = int(np.sum(np.asarray(series.values, dtype=float) > 0.0))
+                    unavailable = int(np.sum(np.asarray(series.values, dtype=float) < 0.5))
+                    share = (unavailable / connected) if connected > 0 else float("nan")
+                    preview_rows.append(
+                        {
+                            "scenario": str(scenario),
+                            "year": str(year),
+                            "connected_hours": connected,
+                            "unavailable_hours": unavailable,
+                            "share_unavailable": share,
+                        }
+                    )
+            with st.expander("Scenario-year availability summary", expanded=False):
+                st.dataframe(
+                    pd.DataFrame(preview_rows).style.format({"share_unavailable": "{:.2%}"}),
+                    width="stretch",
+                    hide_index=True,
+                )
+        else:
             total_hours = int(availability_values.size)
             unavailable_share = (unavailable_hours / total_hours) if total_hours > 0 else float("nan")
             c21, c22 = st.columns(2)
@@ -621,7 +650,7 @@ def render_page() -> None:
             st.stop()
 
         _render_dataset_section(ds, loader_mode, paths)
-        _render_typical_year_grid_controls(project_name, formulation, ds, paths)
+        _render_grid_controls(project_name, formulation, ds, paths)
 
     if ds is not None:
         st.markdown("---")
