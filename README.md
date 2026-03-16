@@ -38,6 +38,30 @@ conda activate mgpy_planning
 
 ### 2. Install the main dependencies
 
+The preferred option is to use one of the dependency files already provided in the project root.
+
+Using the Conda environment file:
+
+```bash
+conda env create -f environment.yml
+conda activate mgpy_planning
+```
+
+If you want a lighter or more portable Conda resolution, you can also use:
+
+```bash
+conda env create -f environment_nobuilds.yml
+conda activate mgpy_planning
+```
+
+If you prefer installing from `requirements.txt` inside an existing environment:
+
+```bash
+pip install -r requirements.txt
+```
+
+If needed, the main dependencies can also be installed manually:
+
 ```bash
 conda install -c conda-forge streamlit pandas numpy xarray matplotlib pyyaml
 pip install linopy
