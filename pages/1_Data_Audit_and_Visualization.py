@@ -345,18 +345,14 @@ def _render_soft_check_warnings(ds: xr.Dataset) -> None:
 
 def _render_file_section(project_root: Path, formulation: Dict[str, Any], paths) -> bool:
     st.subheader("Section A - Required Input Files")
-    st.caption("Check that the active project contains the inputs required to construct the canonical dataset.")
+    st.caption(f"Check that the active project contains the inputs required to construct the canonical dataset. Project path: `{project_root}`")
 
     required_df = _build_file_table(paths, REQUIRED_INPUTS)
     optional_df = _build_file_table(paths, OPTIONAL_INPUTS)
     missing = _required_missing_for_configuration(formulation, paths)
 
-    c1, c2 = st.columns(2)
-    with c1:
-        present_required = int((required_df["status"] == "found").sum())
-        st.metric("Required files present", f"{present_required}/{len(REQUIRED_INPUTS)}")
-    with c2:
-        st.caption(f"Project path: `{project_root}`")
+    present_required = int((required_df["status"] == "found").sum())
+    st.metric("Required files present", f"{present_required}/{len(REQUIRED_INPUTS)}")
 
     st.markdown("**Required files**")
     st.dataframe(required_df, width="stretch", hide_index=True)
