@@ -170,8 +170,6 @@ def initialize_constraints(
     ll = vars["lost_load"]  # (period, year, scenario)
     grid_imp = vars.get("grid_import")
     grid_exp = vars.get("grid_export")
-    gen_seg = vars.get("gen_segment_energy")
-
     # ------------------------------------------------------------------
     # 1) Renewable generation capacity with year availability
     # ------------------------------------------------------------------
@@ -215,15 +213,98 @@ def initialize_constraints(
     # ------------------------------------------------------------------
     # 3) Fuel-to-power relation
     # ------------------------------------------------------------------
-    if gen_seg is not None and p.generator_eff_curve_eff is not None and p.generator_eff_curve_rel_power is not None:
-        model.add_constraints(gen_seg.sum("curve_point") == gen_gen, name="generator_segment_link")
+    if p.generator_eff_curve_eff is not None and p.generator_eff_curve_rel_power is not None:
+        pl_rel = p.generator_eff_curve_rel_power
+        pl_eff = p.generator_eff_curve_eff
+        scenario_labels = [str(s) for s in sets.coords["scenario"].values.tolist()]
 
-        eff_curve = p.generator_eff_curve_eff.fillna(gen_eta_full)
-        denom = fuel_lhv * eff_curve
-        model.add_constraints(
-            fuel_cons >= (gen_seg / denom).sum("curve_point"),
-            name="fuel_to_power_partial_load_lb",
-        )
+        def _scenario_has_curve(scen: str) -> bool:
+            rel = pl_rel.sel(scenario=scen)
+            eff = pl_eff.sel(scenario=scen)
+            return bool(np.isfinite(rel.values).any() and np.isfinite(eff.values).any())
+
+        scenarios_with_pl = [s for s in scenario_labels if _scenario_has_curve(s)]
+        scenarios_without_pl = [s for s in scenario_labels if s not in scenarios_with_pl]
+
+        if len(scenarios_without_pl) > 0:
+            model.add_constraints(
+                gen_gen.sel(scenario=scenarios_without_pl)
+                == fuel_cons.sel(scenario=scenarios_without_pl) * fuel_lhv.sel(scenario=scenarios_without_pl) * gen_eta_full,
+                name="fuel_to_power_nominal_eta",
+            )
+
+        if len(scenarios_with_pl) > 0:
+            P = int(pl_rel.sizes["curve_point"])
+            seg = xr.IndexVariable("segment", np.arange(P - 1))
+
+            for s in scenarios_with_pl:
+                lhv_s = fuel_lhv.sel(scenario=s)
+                cap_sy = gen_cap_available.sel(scenario=s) if "scenario" in gen_cap_available.dims else gen_cap_available
+                r_full = pl_rel.sel(scenario=s)
+                e_full = pl_eff.sel(scenario=s)
+
+                if not (np.isfinite(r_full.values).all() and np.isfinite(e_full.values).all()):
+                    raise InputValidationError(
+                        f"Partial-load curve for scenario '{s}' contains NaNs; provide a full curve_point series."
+                    )
+                if np.any(np.diff(r_full.values) < 0.0):
+                    raise InputValidationError(
+                        f"Partial-load curve for scenario '{s}' must be sorted by increasing relative power output."
+                    )
+                positive_power_mask = np.asarray(r_full.values, dtype=float) > 0.0
+                if np.any(np.asarray(e_full.values, dtype=float)[positive_power_mask] <= 0.0):
+                    raise InputValidationError(
+                        f"Partial-load curve for scenario '{s}' contains non-positive efficiencies at positive output."
+                    )
+
+                r0 = r_full.isel(curve_point=seg)
+                r1 = r_full.isel(curve_point=seg + 1)
+                eta0 = e_full.isel(curve_point=seg)
+                eta1 = e_full.isel(curve_point=seg + 1)
+
+                rel0 = xr.DataArray(
+                    np.asarray(r0.values, dtype=float),
+                    coords={"segment": seg},
+                    dims=("segment",),
+                )
+                rel1 = xr.DataArray(
+                    np.asarray(r1.values, dtype=float),
+                    coords={"segment": seg},
+                    dims=("segment",),
+                )
+                eff0 = xr.DataArray(
+                    np.asarray(eta0.values, dtype=float),
+                    coords={"segment": seg},
+                    dims=("segment",),
+                )
+                eff1 = xr.DataArray(
+                    np.asarray(eta1.values, dtype=float),
+                    coords={"segment": seg},
+                    dims=("segment",),
+                )
+
+                lhv_value = float(lhv_s)
+                alpha0 = xr.where(np.isclose(rel0, 0.0), 0.0, rel0 / (eff0 * lhv_value))
+                alpha1 = xr.where(np.isclose(rel1, 0.0), 0.0, rel1 / (eff1 * lhv_value))
+
+                rel_span = rel1 - rel0
+                if np.any(np.isclose(rel_span.values.astype(float), 0.0)):
+                    raise InputValidationError(
+                        f"Partial-load curve for scenario '{s}' contains repeated relative-power points."
+                    )
+
+                slope = (alpha1 - alpha0) / rel_span
+                intercept = alpha0 - slope * rel0
+
+                gen_sy = gen_gen.sel(scenario=s).expand_dims(segment=seg)
+                fuel_sy = fuel_cons.sel(scenario=s).expand_dims(segment=seg)
+                cap_seg = cap_sy.expand_dims(segment=seg)
+                rhs = slope * gen_sy + intercept * cap_seg
+
+                model.add_constraints(
+                    fuel_sy >= rhs,
+                    name=f"fuel_to_power_partial_load_{s}",
+                )
     else:
         model.add_constraints(
             gen_gen == fuel_cons * fuel_lhv * gen_eta_full,

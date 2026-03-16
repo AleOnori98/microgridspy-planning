@@ -35,8 +35,6 @@ def initialize_vars(sets: xr.Dataset, data: xr.Dataset, model: lp.Model) -> Dict
       - grid_import(period, year, scenario)
       - grid_export(period, year, scenario) (if allow_export)
 
-    Optional partial-load curve scaffolding:
-      - gen_segment_energy(period, year, scenario, curve_point) (only if curve exists)
     """
     if not isinstance(sets, xr.Dataset):
         raise InputValidationError("initialize_vars: sets must be an xarray.Dataset.")
@@ -62,9 +60,6 @@ def initialize_vars(sets: xr.Dataset, data: xr.Dataset, model: lp.Model) -> Dict
     allow_export = p.is_grid_export_enabled()
     partial_load_enabled = bool((p.settings.get("generator", {}) or {}).get("partial_load_modelling_enabled", False))
     is_integer = bool(p.settings.get("unit_commitment", False))
-
-    # curve coord exists only if you merged curve_ds
-    has_curve_coord = p.curve_point is not None
 
     vars: Dict[str, lp.Variable] = {}
 
@@ -171,19 +166,5 @@ def initialize_vars(sets: xr.Dataset, data: xr.Dataset, model: lp.Model) -> Dict
                 coords={"period": period, "year": year, "scenario": scenario},
                 name="grid_export",
             )
-
-    # =========================================================================
-    # Optional: partial-load curve scaffolding
-    # =========================================================================
-    # Keep this minimal: create segment energy variables only if curve exists.
-    # Later you can enforce convex combination / SOS2 / piecewise constraints.
-    if partial_load_enabled and has_curve_coord:
-        curve_point = p.curve_point
-        vars["gen_segment_energy"] = model.add_variables(
-            lower=0.0,
-            dims=("period", "year", "scenario", "curve_point"),
-            coords={"period": period, "year": year, "scenario": scenario, "curve_point": curve_point},
-            name="gen_segment_energy",
-        )
 
     return vars

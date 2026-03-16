@@ -38,8 +38,6 @@ def _days_to_slice(T: int, start_day: int, ndays: int) -> Tuple[slice, int, int]
     start_day = int(np.clip(start_day, 1, max_day))
     window = ndays * 24
     i0 = (start_day - 1) * 24
-    if i0 + window > T:
-        i0 = max(0, T - window)
     i1 = min(T, i0 + window)
     return slice(i0, i1), i0 + 1, i1 - i0
 
@@ -260,8 +258,10 @@ def render_typical_year_results_from_files(file_results: TypicalYearFileResults,
     T = int(len(disp_view))
     with st.expander("Time window", expanded=False):
         st.caption("Pick the start day and how many days to plot (1-7).")
-        start_day = st.slider("Start day", min_value=1, max_value=max(1, int(np.ceil(T / 24))), value=1, step=1, key="gp_disp_start_day_file")
-        ndays = st.slider("Number of days", min_value=1, max_value=7, value=1, step=1, key="gp_disp_ndays_file")
+        max_days = max(1, int(np.ceil(T / 24)))
+        ndays = st.slider("Number of days", min_value=1, max_value=min(7, max_days), value=1, step=1, key="gp_disp_ndays_file")
+        max_start_day = max(1, max_days - ndays + 1)
+        start_day = st.slider("Start day", min_value=1, max_value=max_start_day, value=1, step=1, key="gp_disp_start_day_file")
     idx, start_hr, window = _days_to_slice(T, start_day=start_day, ndays=ndays)
     x = np.arange(start_hr, start_hr + window)
     fig, ax = plt.subplots(figsize=(11, 4))
