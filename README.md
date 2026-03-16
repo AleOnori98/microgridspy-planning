@@ -1,186 +1,233 @@
-# MicroGridsPy Planning — Streamlit Optimization Tool
+# MicroGridsPy Planning - Streamlit Optimization Tool
 
-MicroGridsPy Planning is a bottom-up, open-source optimization tool for the techno-economic planning of mini-grid energy systems in remote and underserved areas. The model is implemented in Python using Linopy and provides a transparent framework for system sizing, dispatch optimization, and long-term planning under uncertainty.
+MicroGridsPy Planning is an open-source optimization tool for the techno-economic planning of mini-grid energy systems in remote and underserved areas. The application is built in Python with Streamlit for the user interface and Linopy for mathematical optimization.
 
-The tool is designed as an interactive Streamlit application guiding the user through a structured workflow from problem definition to optimization results.
+The tool is designed as a guided planning workspace: users define a project, generate structured input templates, audit the data, run the optimization, and explore results within the same application.
 
-The reference energy system includes renewable generation, battery storage, backup generators, and optional grid connection, enabling analysis of both off-grid and weak-grid configurations. :contentReference[oaicite:0]{index=0}
+The reference energy system can include:
+- Renewable generation
+- Battery storage
+- Backup generators
+- Optional grid connection
+- Optional grid export
+
+The app supports both simple and advanced studies, including:
+- Typical-year and multi-year formulations
+- Single-scenario and multi-scenario analyses
+- Continuous and discrete sizing
+- Optional carbon-cost internalization
+- Renewable land constraints
+- Capacity expansion over time
+
+Each project is stored in its own folder with CSV, YAML, and JSON files, so studies remain reproducible, inspectable, and easy to revisit.
+
+![MicroGridsPy Planning interface](assets/intro_interface.png)
+
+---
+
+## Installation
+
+The recommended setup uses Anaconda or Miniconda.
+
+### 1. Create and activate an environment
+
+```bash
+conda create -n mgpy_planning python=3.11
+conda activate mgpy_planning
+```
+
+### 2. Install the main dependencies
+
+```bash
+conda install -c conda-forge streamlit pandas numpy xarray matplotlib pyyaml
+pip install linopy
+```
+
+### 3. Install a solver
+
+At least one solver is required.
+
+For HiGHS:
+
+```bash
+conda install -c conda-forge highspy
+```
+
+For Gurobi, install the Python package and make sure a valid license is available:
+
+```bash
+pip install gurobipy
+```
+
+### 4. Launch the app
+
+From the repository root:
+
+```bash
+streamlit run Home.py
+```
+
+If the app was already open while you installed new dependencies, restart Streamlit so the environment is reloaded.
 
 ---
 
-## Intended Workflow and User Experience
+## What The App Does
 
-The application is organized as a pipeline of Streamlit pages that progressively define, validate, and solve a planning problem.
+MicroGridsPy Planning combines project setup, input-template generation, data audit, optimization, and result interpretation in a single interface.
 
-### 1. Project Setup — Global Settings
+It is intended to support a complete workflow:
+1. Define the structure of the planning problem.
+2. Generate the input templates required by that problem.
+3. Fill and validate the CSV and YAML inputs.
+4. Solve the optimization model.
+5. Inspect design, dispatch, cost, and reliability results.
 
-The initial page defines the overall characteristics of the planning problem:
-
-- System configuration (off-grid or grid-connected)
-- Technologies included (renewables, storage, generators, grid)
-- Planning mode (Typical-Year or Multi-Year)
-- Temporal resolution and problem dimensions
-- Scenario structure (deterministic or multi-scenario)
-- Economic parameters and modelling options
-
-These settings determine the structure of the optimization problem and are saved as a JSON configuration file.
+This makes the tool useful both for early-stage feasibility studies and for more detailed long-term planning exercises.
 
 ---
+
+## Intended Workflow And User Experience
+
+The application is organized as a sequence of Streamlit pages that progressively define, validate, solve, and interpret a planning problem.
+
+### 1. Project Setup
+
+The first page defines the global structure of the study:
+- Off-grid or on-grid configuration
+- Technologies included in the system
+- Typical-year or multi-year formulation
+- Deterministic or multi-scenario setup
+- Economic and policy settings
+- Optional modelling features such as carbon cost or discrete sizing
+
+These choices determine the shape of the optimization problem and the set of input templates generated for the user.
 
 ### 2. Input Template Generation
 
-Based on the selected configuration, the tool generates a set of structured input templates (CSV/YAML/JSON) tailored to the problem dimensions and enabled components.
+Based on the selected configuration, the application creates structured templates tailored to the project:
+- CSV files for time series
+- YAML files for techno-economic parameters
+- JSON settings for workflow and formulation choices
 
-The user fills these templates with:
+This helps keep user inputs consistent with the actual model dimensions and enabled technologies.
 
-- Time-series data (load, renewable resources, grid availability)
-- Technology parameters (costs, efficiencies, lifetimes)
-- Economic assumptions
-- Scenario definitions
+### 3. Data Audit And Visualization
 
-This ensures consistency between user inputs and the mathematical model.
+Before optimization, the user can inspect and validate the generated inputs through:
+- Dataset structure summaries
+- Parameter overviews
+- Optimization-constraint summaries
+- Time-series visualizations
+- Grid availability checks for on-grid systems
 
----
+This step is useful for detecting mistakes before solving.
 
-### 3. Input Visualization
+### 4. Optimization
 
-A dedicated page allows inspection and validation of input data before optimization:
+The optimization page builds and solves the mathematical model using:
+- HiGHS
+- Gurobi
 
-- Time-series plots (load, resources, prices, outages)
-- Scenario comparison
-- Data consistency checks
+The model computes the least-cost system design and dispatch subject to the selected technical, economic, and policy constraints.
 
-This step reduces modelling errors and improves transparency.
+### 5. Results
 
----
+The results page provides access to:
+- Optimal capacities
+- Dispatch plots
+- Energy-balance views
+- Cost breakdowns
+- Emissions indicators
+- Reliability metrics
+- Scenario-dependent outputs
 
-### 4. Optimization Execution
-
-The optimization page builds and solves the model using:
-
-- HiGHS (open-source solver)
-- Gurobi (commercial solver, optional)
-
-The model performs optimal system sizing and dispatch to minimize system cost subject to technical and economic constraints.
-
----
-
-### 5. Results Exploration
-
-Results include:
-
-- Optimal capacities of all technologies
-- Dispatch profiles
-- Cost breakdown
-- Energy balances
-- Reliability indicators
-- Scenario statistics
+For multi-year studies, the app also supports year-by-year and investment-step interpretation.
 
 ---
 
 ## Planning Modes
 
-MicroGridsPy supports two complementary modelling formulations, representing different levels of temporal realism and computational complexity:
+MicroGridsPy Planning supports two complementary formulations.
 
-- Typical-Year Planning (steady-state)
-- Multi-Year Planning (dynamic capacity expansion)
+### Typical-Year Planning
 
-Both formulations are investment-oriented and minimize expected system cost across scenarios. :contentReference[oaicite:1]{index=1}
+The typical-year formulation represents the system with a single representative year.
 
----
+It is most appropriate when:
+- Demand and resource conditions are assumed to be stationary
+- Capacity expansion is not required
+- A compact, computationally efficient model is preferred
 
-## Typical-Year Planning Mode (Steady-State)
+The objective is based on expected equivalent annual cost, combining annualized investment costs and expected operating costs.
 
-The Typical-Year model represents the system using a single representative year that repeats indefinitely.
+### Multi-Year Planning
 
-Key assumptions:
+The multi-year formulation represents the system over an explicit planning horizon.
 
-- Stationary demand and resource conditions
-- No explicit capacity expansion
-- No degradation or learning effects
-- System operates in long-term equilibrium
+It is most appropriate when:
+- Demand evolves over time
+- Capacity expansion is relevant
+- Degradation, replacement, and investment timing matter
+- Long-term trade-offs need to be assessed explicitly
 
-Investment costs are annualized using the Capital Recovery Factor (CRF), converting capital expenditure into an equivalent annual payment.
-
-The objective is to minimize the Expected Equivalent Annual Cost (EAC):
-
-- Annualized investment costs
-- Expected operational costs across scenarios
-- Externalities (e.g., emissions, unserved energy)
-
-This formulation is computationally efficient and suitable for:
-
-- Feasibility studies
-- Technology comparison
-- Systems with stable long-term conditions
-- Large stochastic scenario sets
-
-In this steady-state interpretation, assets are implicitly replaced indefinitely, producing a perpetual replacement logic equivalent to infinite discounted reinvestments. :contentReference[oaicite:2]{index=2}
+The objective is based on expected net present cost and includes the time value of money, operating costs, and remaining asset value where applicable.
 
 ---
 
-## Multi-Year Planning Mode (Dynamic Formulation)
+## Main Modeling Features
 
-The Multi-Year model explicitly simulates a planning horizon composed of multiple years.
-
-It is formulated as a stochastic capacity-expansion problem where investments and operations evolve over time.
-
-Key features include:
-
-### Capacity Expansion
-
-- Investments can occur at multiple stages
-- Installed capacity is non-decreasing
-- Technology roll-out and replacement cycles are modeled
-
-### Intertemporal Economics
-
-All costs are evaluated in present value terms using a dual-rate logic:
-
-- Technology-specific WACC governs capital recovery
-- A social discount rate is used for system-level valuation
-
-This separates financial costs from societal time preferences.
-
-### Residual Value (Salvage)
-
-Assets that outlive the planning horizon retain residual value, preventing bias against long-lived technologies and ensuring economic consistency.
-
-### Stochastic Operation
-
-Operational decisions are scenario-dependent, while investment decisions are shared across scenarios to ensure robust system design.
+Depending on project setup, the application can represent:
+- Off-grid and on-grid systems
+- Optional grid export
+- Renewable, battery, and generator investment
+- Generator partial-load efficiency curves
+- Scenario-weighted uncertainty
+- Land-use limits for renewables
+- Lost-load constraints and penalties
+- Minimum renewable penetration targets
+- Carbon-cost inclusion in the objective
+- Continuous sizing or discrete unit-based sizing
+- Capacity expansion over multiple investment stages
 
 ---
 
-### Objective
+## Input Structure
 
-The dynamic formulation minimizes the Expected Net Present Cost (NPC) of the system, including:
+Each project is stored under its own folder and typically contains:
 
-- Investment annuities
-- Operational expenditures
-- Externalities
-- Salvage value of remaining assets
+### Core configuration
+- `formulation.json`
 
-This approach captures demand evolution, aging, financing structure, and long-term trade-offs that cannot be represented in steady-state models. :contentReference[oaicite:3]{index=3}
+### Time-series inputs
+- `load_demand.csv`
+- `resource_availability.csv`
+- `grid_import_price.csv`
+- `grid_export_price.csv`
+- `grid_availability.csv`
 
----
+### Technology inputs
+- `renewables.yaml`
+- `battery.yaml`
+- `generator.yaml`
+- `generator_efficiency_curve.csv`
+- `grid.yaml`
 
-## Mathematical Structure
-
-Both planning modes share a bottom-up cost accounting framework:
-
-- Capacity sizing decisions determine investment costs
-- Dispatch decisions determine operational costs
-- Externalities can be internalized
-- Energy balance constraints ensure feasibility
-
-Hourly resolution is typically used for operations, and multiple scenarios can represent uncertainty in demand, resources, or grid conditions. :contentReference[oaicite:4]{index=4}
+The exact set of files depends on whether the project is typical-year or multi-year, off-grid or on-grid, and whether optional features such as export or partial-load modeling are enabled.
 
 ---
 
 ## Solvers
 
 Supported optimization solvers:
+- `HiGHS`: open-source and recommended as the default option
+- `Gurobi`: commercial solver, useful for harder MILP cases or larger studies
 
-- **HiGHS** — open-source linear solver (default)
-- **Gurobi** — commercial solver (optional)
+If you select HiGHS in the app, make sure the `highspy` package is installed in the active environment.
+
+---
+
+## Contacts
+
+For questions, feedback, or collaboration:
+
+- Alessandro Onori - `alessandro.onori@polimi.it`
