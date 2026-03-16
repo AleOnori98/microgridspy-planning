@@ -14,9 +14,12 @@ from core.export.results_page_helpers import (
     build_energy_balance_dataframe,
     export_results_from_bundle,
     get_results_bundle_from_session,
+    load_multi_year_results_from_files,
+    load_typical_year_results_from_files,
 )
 from core.visualization.page_helpers import get_dataset_settings, get_nested_flag, safe_float as _safe_float
-from core.visualization.multi_year_results_page import render_multi_year_results
+from core.visualization.multi_year_results_page import render_multi_year_results, render_multi_year_results_from_files
+from core.visualization.typical_year_file_results_page import render_typical_year_results_from_files
 
 
 # Keep aligned with your Optimization page
@@ -233,15 +236,32 @@ def _render_energy_balance_check(bundle: ResultsBundle, tolerance: float = 1e-6)
 
 def render_generation_planning_results_page() -> None:
     st.title("Results")
-    st.caption("Explore the latest solved results stored in session state.")
+    st.caption("Explore the latest solved results from session state or, if available, saved results loaded from project files.")
 
     project_name = st.session_state.get(KEYS["active_project"])
     if project_name:
         st.success(f"Active project: {project_name}")
 
     # Canonical source for all sections: model.solution -> vars -> data via ResultsBundle helper.
-    bundle = get_results_bundle_from_session(st.session_state)
+    bundle = get_results_bundle_from_session(st.session_state, active_project=project_name)
     if bundle is None or not isinstance(bundle.data, xr.Dataset) or not isinstance(bundle.vars, dict):
+        if project_name:
+            try:
+                file_results = load_typical_year_results_from_files(project_name)
+            except Exception as exc:
+                file_results = None
+                st.warning(f"Saved results could not be loaded from files: {exc}")
+            if file_results is not None:
+                render_typical_year_results_from_files(file_results, project_name)
+                return
+            try:
+                multi_year_file_results = load_multi_year_results_from_files(project_name)
+            except Exception as exc:
+                multi_year_file_results = None
+                st.warning(f"Saved multi-year results could not be loaded from files: {exc}")
+            if multi_year_file_results is not None:
+                render_multi_year_results_from_files(multi_year_file_results, project_name)
+                return
         st.error("No results found. Please run the optimization first (solve step).")
         return
 
@@ -1104,8 +1124,9 @@ def render_generation_planning_results_page() -> None:
     st.subheader("Export Results")
     if st.button("Export results to CSV", type="primary"):
         try:
-            model_obj = st.session_state.get("gp_model_obj")
-            written = export_results_from_bundle(project_name, bundle, model_obj=model_obj)
+            with st.spinner("Exporting results..."):
+                model_obj = st.session_state.get("gp_model_obj")
+                written = export_results_from_bundle(project_name, bundle, model_obj=model_obj)
             st.success("Export completed.")
             st.json(written)
             st.markdown("**Generated files**")
