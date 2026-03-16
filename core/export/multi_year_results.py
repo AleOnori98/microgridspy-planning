@@ -24,6 +24,59 @@ from core.multi_year_model.lifecycle import (
 )
 from core.multi_year_model.params import get_params
 
+
+def _sanitize_sheet_name(name: Any) -> str:
+    text = str(name)
+    invalid = '[]:*?/\\'
+    for ch in invalid:
+        text = text.replace(ch, "_")
+    return text[:31] or "Sheet"
+
+
+def _write_multi_year_excel_workbook(
+    out_path: Path,
+    *,
+    design: pd.DataFrame,
+    dispatch: pd.DataFrame,
+    balance: pd.DataFrame,
+    kpis: pd.DataFrame,
+    cash: pd.DataFrame,
+) -> str:
+    with pd.ExcelWriter(out_path) as writer:
+        design.to_excel(writer, sheet_name="design_by_step", index=False)
+        dispatch.to_excel(writer, sheet_name="dispatch_timeseries", index=False)
+        cash.to_excel(writer, sheet_name="cashflows_discounted", index=False)
+
+        for year in cash["year"].tolist():
+            year_label = str(year)
+            sheet_name = _sanitize_sheet_name(year_label)
+            row = 0
+
+            pd.DataFrame({"section": [f"Performance KPIs - {year_label}"]}).to_excel(
+                writer, sheet_name=sheet_name, index=False, header=False, startrow=row
+            )
+            row += 2
+            kpis_year = kpis[kpis["year"].astype(str) == year_label].copy()
+            kpis_year.to_excel(writer, sheet_name=sheet_name, index=False, startrow=row)
+            row += len(kpis_year) + 3
+
+            pd.DataFrame({"section": [f"Discounted cash flow - {year_label}"]}).to_excel(
+                writer, sheet_name=sheet_name, index=False, header=False, startrow=row
+            )
+            row += 2
+            cash_year = cash[cash["year"].astype(str) == year_label].copy()
+            cash_year.to_excel(writer, sheet_name=sheet_name, index=False, startrow=row)
+            row += len(cash_year) + 3
+
+            pd.DataFrame({"section": [f"Energy balance - {year_label}"]}).to_excel(
+                writer, sheet_name=sheet_name, index=False, header=False, startrow=row
+            )
+            row += 2
+            balance_year = balance[balance["year"].astype(str) == year_label].copy()
+            balance_year.to_excel(writer, sheet_name=sheet_name, index=False, startrow=row)
+
+    return str(out_path)
+
 def _scenario_weights(p: Any, scenario_coord: xr.DataArray) -> xr.DataArray:
     if isinstance(p.scenario_weight, xr.DataArray):
         return p.scenario_weight.sel(scenario=scenario_coord)
@@ -413,8 +466,7 @@ def export_multi_year_results(
     design = build_design_by_step_table_multi_year(sets=sets, data=data, vars=vars, solution=solution)
     kpis = build_yearly_kpis_table_multi_year(data=data, vars=vars, solution=solution, objective_value=obj)
     cash = build_discounted_cashflows_table_multi_year(sets=sets, data=data, vars=vars, solution=solution)
-
-    return write_csv_outputs(
+    written = write_csv_outputs(
         out_dir,
         {
             "dispatch_timeseries.csv": dispatch,
@@ -424,3 +476,14 @@ def export_multi_year_results(
             "cashflows_discounted.csv": cash,
         },
     )
+
+    excel_path = out_dir / "results_multi_year.xlsx"
+    written["results_excel"] = _write_multi_year_excel_workbook(
+        excel_path,
+        design=design,
+        dispatch=dispatch,
+        balance=balance,
+        kpis=kpis,
+        cash=cash,
+    )
+    return written

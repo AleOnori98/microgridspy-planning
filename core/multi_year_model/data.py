@@ -1479,6 +1479,117 @@ def _load_grid_yaml_dynamic(
     ds.attrs["settings"] = {"inputs_loaded": {"grid_yaml": str(path)}, "formulation": "dynamic"}
     return ds
 
+
+def _write_grid_availability_csv_dynamic(path: Path, *, availability: xr.DataArray) -> None:
+    if set(availability.dims) != {"period", "scenario", "year"}:
+        raise InputValidationError("grid_availability must have dims ('period','scenario','year').")
+
+    period = availability.coords["period"].values.astype(int)
+    scenario_labels = [str(v) for v in availability.coords["scenario"].values.tolist()]
+    year_values = availability.coords["year"].values.tolist()
+    year_labels = [str(v) for v in year_values]
+
+    cols = [("meta", "hour")] + [(scenario, year) for scenario in scenario_labels for year in year_labels]
+    df = pd.DataFrame(columns=pd.MultiIndex.from_tuples(cols))
+    df[("meta", "hour")] = period
+
+    for scenario in scenario_labels:
+        for year_value, year_label in zip(year_values, year_labels):
+            df[(scenario, year_label)] = availability.sel(scenario=scenario, year=year_value).values.astype(float)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(path, index=False)
+
+
+def _first_connection_year_to_ordinal(first_year_value: Any, year_values: list[Any]) -> int | None:
+    try:
+        if first_year_value is None or np.isnan(float(first_year_value)):
+            return None
+    except Exception:
+        pass
+
+    if not year_values:
+        return None
+
+    year_labels = [str(v) for v in year_values]
+    fy_str = str(first_year_value)
+    if fy_str in year_labels:
+        return year_labels.index(fy_str) + 1
+
+    try:
+        fy_int = int(first_year_value)
+        year_ints = [int(v) for v in year_values]
+        if fy_int <= year_ints[0]:
+            return 1
+        for idx, year_int in enumerate(year_ints, start=1):
+            if fy_int == year_int:
+                return idx
+        if fy_int > year_ints[-1]:
+            return int(len(year_values) + 1)
+    except Exception:
+        pass
+
+    return None
+
+
+def regenerate_grid_availability_dynamic(*, project_name: str, sets: xr.Dataset) -> xr.DataArray:
+    paths = project_paths(project_name)
+    scenario_coord = sets.coords["scenario"]
+    year_coord = sets.coords["year"]
+    period_coord = sets.coords["period"]
+
+    grid_ds = _load_grid_yaml_dynamic(
+        paths.inputs_dir / "grid.yaml",
+        scenario_coord=scenario_coord,
+        year_coord=year_coord,
+    )
+
+    n_p = int(period_coord.size)
+    n_s = int(scenario_coord.size)
+    n_y = int(year_coord.size)
+    avail = np.zeros((n_p, n_s, n_y), dtype=float)
+
+    scenario_labels = [str(s) for s in scenario_coord.values.tolist()]
+    year_values = year_coord.values.tolist()
+    year_labels = [str(y) for y in year_values]
+
+    for j, s_lab in enumerate(scenario_labels):
+        ao = float(grid_ds["grid_avg_outages_per_year"].sel(scenario=s_lab).values)
+        ad = float(grid_ds["grid_avg_outage_duration_minutes"].sel(scenario=s_lab).values)
+        scale_od = float(grid_ds["grid_outage_scale_od_hours"].sel(scenario=s_lab).values)
+        shape_od = float(grid_ds["grid_outage_shape_od"].sel(scenario=s_lab).values)
+        seed = int(float(grid_ds["grid_outage_seed"].sel(scenario=s_lab).values))
+        fy = grid_ds["grid_first_year_connection"].sel(scenario=s_lab).values
+        connection_ordinal = _first_connection_year_to_ordinal(fy, year_values)
+
+        avail_ty = simulate_grid_availability_dynamic(
+            ao,
+            ad,
+            years=int(year_coord.size),
+            periods_per_year=int(period_coord.size),
+            first_year_connection=connection_ordinal,
+            scale_od=scale_od,
+            shape_od=shape_od,
+            rng=np.random.default_rng(seed),
+        )
+
+        for k, y_lab in enumerate(year_labels):
+            connected = True
+            if connection_ordinal is not None:
+                connected = (k + 1) >= int(connection_ordinal)
+            avail[:, j, k] = avail_ty[:, k] if connected else 0.0
+
+    grid_availability = xr.DataArray(
+        avail,
+        coords={"period": period_coord, "scenario": scenario_coord, "year": year_coord},
+        dims=("period", "scenario", "year"),
+        name="grid_availability",
+        attrs={"units": "binary", "component": "grid", "dynamic_only": True},
+    )
+
+    _write_grid_availability_csv_dynamic(paths.inputs_dir / "grid_availability.csv", availability=grid_availability)
+    return grid_availability
+
 # -----------------------------------------------------------------------------
 # main entrypoint (DYNAMIC)
 # -----------------------------------------------------------------------------
@@ -1639,49 +1750,8 @@ def _initialize_data_legacy(project_name: str, sets: xr.Dataset) -> xr.Dataset:
             grid_export_price = None
             exp_path = None
 
-        n_p = int(period_coord.size)
-        n_s = int(scenario_coord.size)
-        n_y = int(year_coord.size)
-        avail = np.zeros((n_p, n_s, n_y), dtype=float)
-
-        scenario_labels = [str(s) for s in scenario_coord.values.tolist()]
-        year_labels = [str(y) for y in year_coord.values.tolist()]
-
-        for j, s_lab in enumerate(scenario_labels):
-            ao = float(grid_ds["grid_avg_outages_per_year"].sel(scenario=s_lab).values)
-            ad = float(grid_ds["grid_avg_outage_duration_minutes"].sel(scenario=s_lab).values)
-            scale_od = float(grid_ds["grid_outage_scale_od_hours"].sel(scenario=s_lab).values)
-            shape_od = float(grid_ds["grid_outage_shape_od"].sel(scenario=s_lab).values)
-            fy = grid_ds["grid_first_year_connection"].sel(scenario=s_lab).values
-
-            avail_ty = simulate_grid_availability_dynamic(
-                ao,
-                ad,
-                years=int(year_coord.size),
-                periods_per_year=int(period_coord.size),
-                first_year_connection=int(fy) if np.isfinite(fy) else None,
-                scale_od=scale_od,
-                shape_od=shape_od,
-                rng=None,
-            )
-
-            fy_is_nan = np.isnan(float(fy))
-            for k, y_lab in enumerate(year_labels):
-                connected = True
-                if not fy_is_nan:
-                    try:
-                        connected = int(y_lab) >= int(fy)
-                    except Exception:
-                        connected = (k + 1) >= int(fy)
-                avail[:, j, k] = avail_ty[:, k] if connected else 0.0
-
-        grid_availability = xr.DataArray(
-            avail,
-            coords={"period": period_coord, "scenario": scenario_coord, "year": year_coord},
-            dims=("period", "scenario", "year"),
-            name="grid_availability",
-            attrs={"units": "binary", "component": "grid", "dynamic_only": True},
-        )
+        grid_availability = regenerate_grid_availability_dynamic(project_name=project_name, sets=sets)
+        grid_avail_csv_path = paths.inputs_dir / "grid_availability.csv"
 
         to_merge = [
             grid_ds,
@@ -1701,6 +1771,7 @@ def _initialize_data_legacy(project_name: str, sets: xr.Dataset) -> xr.Dataset:
                 "grid_yaml": str(grid_yaml_path),
                 "grid_import_price_csv": str(imp_path),
                 "grid_export_price_csv": str(exp_path) if allow_export else None,
+                "grid_availability_csv": str(grid_avail_csv_path),
             },
         }
     else:
