@@ -103,6 +103,19 @@ def _make_stub_vars(data: xr.Dataset) -> dict[str, _VarStub]:
     return vars_dict
 
 
+def _make_stub_vars_with_battery_diagnostics(data: xr.Dataset) -> dict[str, _VarStub]:
+    vars_dict = _make_stub_vars(data)
+    period = data.coords["period"]
+    scenario = data.coords["scenario"]
+    shape_ps = (int(period.size), int(scenario.size))
+    coords = {"period": period, "scenario": scenario}
+    vars_dict["battery_charge_dc"] = _VarStub(xr.DataArray(np.zeros(shape_ps, dtype=float), dims=("period", "scenario"), coords=coords))
+    vars_dict["battery_discharge_dc"] = _VarStub(xr.DataArray(np.zeros(shape_ps, dtype=float), dims=("period", "scenario"), coords=coords))
+    vars_dict["battery_charge_loss"] = _VarStub(xr.DataArray(np.zeros(shape_ps, dtype=float), dims=("period", "scenario"), coords=coords))
+    vars_dict["battery_discharge_loss"] = _VarStub(xr.DataArray(np.zeros(shape_ps, dtype=float), dims=("period", "scenario"), coords=coords))
+    return vars_dict
+
+
 def test_typical_year_export_smoke(tmp_path: Path) -> None:
     project_name = "test_typical"
     sets = initialize_sets(project_name)
@@ -137,3 +150,28 @@ def test_typical_year_export_smoke(tmp_path: Path) -> None:
     assert {"period", "scenario", "demand", "balance_lhs", "balance_residual"}.issubset(energy.columns)
     assert {"battery_units", "generator_units", "res_units_total"}.issubset(design.columns)
     assert {"scenario", "total_demand_kwh", "lost_load_kwh", "objective_value"}.issubset(kpis.columns)
+
+
+def test_typical_year_export_includes_optional_battery_diagnostics(tmp_path: Path) -> None:
+    project_name = "test_typical"
+    sets = initialize_sets(project_name)
+    data = initialize_data(project_name, sets)
+    vars_dict = _make_stub_vars_with_battery_diagnostics(data)
+
+    out = export_typical_year_results(
+        project_name=project_name,
+        sets=sets,
+        data=data,
+        model=None,
+        vars=vars_dict,
+        solution=None,
+        out_dir=tmp_path / "typical_year_diag",
+    )
+
+    dispatch = pd.read_csv(out["dispatch_timeseries_csv"])
+    assert {
+        "battery_charge_dc",
+        "battery_discharge_dc",
+        "battery_charge_loss",
+        "battery_discharge_loss",
+    }.issubset(dispatch.columns)

@@ -45,15 +45,20 @@ class Params:
     battery_wacc: xr.DataArray
     battery_fixed_om_share_per_year: xr.DataArray
     battery_embedded_emissions_kgco2e_per_kwh: xr.DataArray
+    battery_max_installable_capacity_kwh: Optional[xr.DataArray]
     battery_charge_efficiency: xr.DataArray
     battery_discharge_efficiency: xr.DataArray
     battery_initial_soc: xr.DataArray
+    battery_initial_soh: Optional[xr.DataArray]
     battery_depth_of_discharge: xr.DataArray
     battery_max_charge_time_hours: xr.DataArray
     battery_max_discharge_time_hours: xr.DataArray
+    battery_cycle_fade_coefficient_per_kwh_throughput: Optional[xr.DataArray]
+    battery_calendar_time_increment_per_step: Optional[xr.DataArray]
 
     # Generator / fuel
     generator_nominal_capacity_kw: xr.DataArray
+    generator_max_installable_capacity_kw: xr.DataArray
     generator_specific_investment_cost_per_kw: xr.DataArray
     generator_lifetime_years: xr.DataArray
     generator_wacc: xr.DataArray
@@ -73,6 +78,7 @@ class Params:
     # Optional curve vars
     generator_eff_curve_rel_power: Optional[xr.DataArray]
     generator_eff_curve_eff: Optional[xr.DataArray]
+    generator_fuel_curve_rel_fuel_use: Optional[xr.DataArray]
 
     def is_grid_on(self) -> bool:
         return bool(((self.settings.get("grid", {}) or {}).get("on_grid", False)))
@@ -124,13 +130,18 @@ def get_params(ds: xr.Dataset) -> Params:
         battery_wacc=ds["battery_wacc"],
         battery_fixed_om_share_per_year=ds["battery_fixed_om_share_per_year"],
         battery_embedded_emissions_kgco2e_per_kwh=ds["battery_embedded_emissions_kgco2e_per_kwh"],
+        battery_max_installable_capacity_kwh=_opt("battery_max_installable_capacity_kwh"),
         battery_charge_efficiency=ds["battery_charge_efficiency"],
         battery_discharge_efficiency=ds["battery_discharge_efficiency"],
         battery_initial_soc=ds["battery_initial_soc"],
+        battery_initial_soh=_opt("battery_initial_soh"),
         battery_depth_of_discharge=ds["battery_depth_of_discharge"],
         battery_max_charge_time_hours=ds["battery_max_charge_time_hours"],
         battery_max_discharge_time_hours=ds["battery_max_discharge_time_hours"],
+        battery_cycle_fade_coefficient_per_kwh_throughput=_opt("battery_cycle_fade_coefficient_per_kwh_throughput"),
+        battery_calendar_time_increment_per_step=_opt("battery_calendar_time_increment_per_step"),
         generator_nominal_capacity_kw=ds["generator_nominal_capacity_kw"],
+        generator_max_installable_capacity_kw=ds["generator_max_installable_capacity_kw"],
         generator_specific_investment_cost_per_kw=ds["generator_specific_investment_cost_per_kw"],
         generator_lifetime_years=ds["generator_lifetime_years"],
         generator_wacc=ds["generator_wacc"],
@@ -146,5 +157,6 @@ def get_params(ds: xr.Dataset) -> Params:
         grid_emissions_factor_kgco2e_per_kwh=_opt("grid_emissions_factor_kgco2e_per_kwh"),
         generator_eff_curve_rel_power=_opt("generator_eff_curve_rel_power"),
         generator_eff_curve_eff=_opt("generator_eff_curve_eff"),
+        generator_fuel_curve_rel_fuel_use=_opt("generator_fuel_curve_rel_fuel_use"),
     )
 
