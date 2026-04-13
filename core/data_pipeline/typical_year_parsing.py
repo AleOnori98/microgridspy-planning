@@ -54,41 +54,29 @@ def _resource_labels(coord: xr.DataArray) -> list[str]:
     return coord_labels(coord)
 
 
-def _require_shared_legacy_scenario_value(
+def _select_typical_year_step_block(
     *,
     path: Path,
-    by_scenario: dict,
-    scenario_labels: list[str],
-    key: str,
+    by_step: dict,
     context: str,
-    optional: bool = False,
-    default: float | None = None,
-) -> float | None:
-    baseline: float | None = None
-    found = False
-    for s_lab in scenario_labels:
-        if s_lab not in by_scenario:
-            raise InputValidationError(f"{path.name}: {context} missing scenario '{s_lab}'.")
-        sb = by_scenario[s_lab]
-        if not isinstance(sb, dict):
-            raise InputValidationError(f"{path.name}: {context}['{s_lab}'] must be a dict.")
-        if key not in sb:
-            continue
-        value = _as_float(sb.get(key), name=f"{context}/{s_lab}/{key}", default=0.0)
-        if not found:
-            baseline = float(value)
-            found = True
-        elif not np.isclose(float(value), float(baseline), atol=1e-12, rtol=0.0):
-            raise InputValidationError(
-                f"{path.name}: {context} uses scenario-specific '{key}', but in the typical-year "
-                "formulation this parameter must be identical across scenarios."
-            )
+) -> tuple[str, dict]:
+    if not isinstance(by_step, dict) or len(by_step) == 0:
+        raise InputValidationError(f"{path.name}: {context} missing/invalid/empty.")
 
-    if found:
-        return baseline
-    if optional:
-        return default
-    raise InputValidationError(f"{path.name}: missing shared '{key}' in {context}.")
+    if "base" in by_step:
+        block = by_step.get("base")
+        if not isinstance(block, dict):
+            raise InputValidationError(f"{path.name}: {context}['base'] must be a dict.")
+        return "base", block
+
+    step_items = [(str(k), v) for k, v in by_step.items()]
+    if len(step_items) == 1 and isinstance(step_items[0][1], dict):
+        return step_items[0][0], step_items[0][1]
+
+    raise InputValidationError(
+        f"{path.name}: {context} must contain a single step block for the steady_state typical-year formulation. "
+        "Use `base`, or keep exactly one step entry."
+    )
 
 
 def _validate_generator_partial_load_curve(
@@ -321,9 +309,9 @@ def _load_renewables_yaml(
             {shared technical params}
 
     Notes:
-      - Typical-year ignores investment steps; it will read the first available by_step entry.
-      - New schemas place fixed O&M and renewable subsidy in investment.by_step, while legacy operation.by_scenario
-        values are still accepted for backward compatibility.
+      - Typical-year uses a single investment block. `investment.by_step.base` is preferred, but a single
+        non-`base` step is also accepted.
+      - Fixed O&M and renewable subsidy must be provided in `investment.by_step`.
       - Dynamic-only degradation is ignored here (not applicable).
       - max_installable_capacity_kw may be NaN if None in YAML.
     """
@@ -385,17 +373,11 @@ def _load_renewables_yaml(
         if not isinstance(inv_block, dict):
             raise InputValidationError(f"{path.name}: resource '{res_label}' missing/invalid 'investment' mapping.")
 
-        inv_by_step = inv_block.get("by_step", None)
-        if not isinstance(inv_by_step, dict) or len(inv_by_step) == 0:
-            raise InputValidationError(f"{path.name}: resource '{res_label}' investment.by_step missing/invalid/empty.")
-
-        # take first available step (typical-year ignores cohorts)
-        first_step_key = next(iter(inv_by_step.keys()))
-        base = inv_by_step.get(first_step_key)
-        if not isinstance(base, dict):
-            raise InputValidationError(
-                f"{path.name}: resource '{res_label}' investment.by_step['{first_step_key}'] must be a dict."
-            )
+        first_step_key, base = _select_typical_year_step_block(
+            path=path,
+            by_step=inv_block.get("by_step", None),
+            context=f"resource '{res_label}' investment.by_step",
+        )
 
         for k in PARAMS_INVESTMENT:
             if k not in base:
@@ -427,37 +409,12 @@ def _load_renewables_yaml(
         for si, _ in enumerate(scenario_labels):
             subsidy_arr[si, j] = inv_arr["production_subsidy_per_kwh"][j]
 
-        op_block = item.get("operation", None)
-        if isinstance(op_block, dict):
-            by_scenario = op_block.get("by_scenario", None)
-            if not isinstance(by_scenario, dict):
-                raise InputValidationError(f"{path.name}: resource '{res_label}' operation.by_scenario missing/invalid.")
-            for si, s_lab in enumerate(scenario_labels):
-                if s_lab not in by_scenario:
-                    raise InputValidationError(
-                        f"{path.name}: resource '{res_label}' missing scenario '{s_lab}' in operation.by_scenario."
-                    )
-                sb = by_scenario[s_lab]
-                if not isinstance(sb, dict):
-                    raise InputValidationError(
-                        f"{path.name}: operation.by_scenario['{s_lab}'] for resource '{res_label}' must be a dict."
-                    )
-                if "production_subsidy_per_kwh" in sb:
-                    subsidy_arr[si, j] = _as_float(
-                        sb.get("production_subsidy_per_kwh"),
-                        name=f"{res_label}/operation/{s_lab}/production_subsidy_per_kwh",
-                        default=0.0,
-                    )
-            shared_fom = _require_shared_legacy_scenario_value(
-                path=path,
-                by_scenario=by_scenario,
-                scenario_labels=scenario_labels,
-                key="fixed_om_share_per_year",
-                context=f"{res_label}/operation/by_scenario",
-                optional=True,
-                default=fom_arr[j],
+        if item.get("operation", None) is not None:
+            raise InputValidationError(
+                f"{path.name}: resource '{res_label}' uses the legacy `operation` block, which is no longer supported "
+                "in the steady_state typical-year schema. Move fixed O&M and production subsidy into "
+                "`investment.by_step.<step>`."
             )
-            fom_arr[j] = float(shared_fom if shared_fom is not None else fom_arr[j])
 
     # -----------------------------
     # Build xr.Dataset
@@ -523,19 +480,16 @@ def _load_battery_yaml(
           {technical params}
 
     Notes:
-      - steady_state ignores investment steps beyond the first entry we find.
-      - New schemas place fixed O&M in investment.by_step, while legacy operation.by_scenario values are still
-        accepted for backward compatibility.
-      - Degradation keys are ignored in steady_state even if present.
+      - steady_state uses a single investment block. `investment.by_step.base` is preferred, but a single
+        non-`base` step is also accepted.
+      - Fixed O&M must be provided in `investment.by_step`.
+      - Multi-year-only degradation keys are not part of the steady_state schema.
     """
     payload = _read_yaml(path)
 
     bat = payload.get("battery", None)
     if not isinstance(bat, dict):
         raise InputValidationError(f"{path.name}: missing/invalid 'battery' mapping.")
-
-    scenario_labels = _scenario_labels(scenario_coord)
-    n_s = len(scenario_labels)
 
     INVESTMENT = [
         "nominal_capacity_kwh",
@@ -550,7 +504,6 @@ def _load_battery_yaml(
         "charge_efficiency",
         "discharge_efficiency",
         "initial_soc",
-        "initial_soh",
         "depth_of_discharge",
         "max_discharge_time_hours",
         "max_charge_time_hours",
@@ -563,18 +516,11 @@ def _load_battery_yaml(
     if not isinstance(inv, dict):
         raise InputValidationError(f"{path.name}: missing/invalid battery.investment mapping.")
 
-    inv_by_step = inv.get("by_step", None)
-    if not isinstance(inv_by_step, dict) or len(inv_by_step) == 0:
-        raise InputValidationError(f"{path.name}: missing/invalid battery.investment.by_step mapping.")
-
-    # Prefer 'base' if present, else take first key deterministically
-    if "base" in inv_by_step and isinstance(inv_by_step["base"], dict):
-        inv_base = inv_by_step["base"]
-    else:
-        first_key = sorted(inv_by_step.keys(), key=lambda x: str(x))[0]
-        inv_base = inv_by_step.get(first_key)
-        if not isinstance(inv_base, dict):
-            raise InputValidationError(f"{path.name}: battery.investment.by_step['{first_key}'] must be a dict.")
+    step_label, inv_base = _select_typical_year_step_block(
+        path=path,
+        by_step=inv.get("by_step", None),
+        context="battery.investment.by_step",
+    )
 
     inv_vals = {}
     for k in INVESTMENT:
@@ -583,7 +529,7 @@ def _load_battery_yaml(
                 inv_vals[k] = float(OPTIONAL_INVESTMENT[k])
                 continue
             raise InputValidationError(f"{path.name}: missing investment param '{k}' in battery.investment.by_step.")
-        inv_vals[k] = _as_float(inv_base.get(k), name=f"battery/investment/base/{k}", default=0.0)
+        inv_vals[k] = _as_float(inv_base.get(k), name=f"battery/investment/{step_label}/{k}", default=0.0)
 
 
     # -----------------------------
@@ -601,11 +547,13 @@ def _load_battery_yaml(
     )
 
     tech_vals = {}
+    if "initial_soh" in tech:
+        raise InputValidationError(
+            f"{path.name}: `battery.technical.initial_soh` is not part of the steady_state typical-year battery schema. "
+            "Remove it from Typical Year projects."
+        )
     for k in TECHNICAL:
         if k not in tech:
-            if k == "initial_soh":
-                tech_vals[k] = 1.0
-                continue
             raise InputValidationError(f"{path.name}: missing technical param '{k}' in battery.technical.")
 
         if k in ("max_installable_capacity_kwh",):
@@ -614,21 +562,11 @@ def _load_battery_yaml(
             tech_vals[k] = _as_float(tech.get(k), name=f"battery/technical/{k}", default=0.0)
 
     fom_value = float(inv_vals["fixed_om_share_per_year"])
-    op = bat.get("operation", None)
-    if isinstance(op, dict):
-        op_by_scen = op.get("by_scenario", None)
-        if not isinstance(op_by_scen, dict):
-            raise InputValidationError(f"{path.name}: missing/invalid battery.operation.by_scenario mapping.")
-        shared_fom = _require_shared_legacy_scenario_value(
-            path=path,
-            by_scenario=op_by_scen,
-            scenario_labels=scenario_labels,
-            key="fixed_om_share_per_year",
-            context="battery/operation/by_scenario",
-            optional=True,
-            default=fom_value,
+    if bat.get("operation", None) is not None:
+        raise InputValidationError(
+            f"{path.name}: the legacy `battery.operation` block is no longer supported in the steady_state "
+            "typical-year schema. Move fixed O&M into `battery.investment.by_step.<step>`."
         )
-        fom_value = float(shared_fom if shared_fom is not None else fom_value)
 
     # -----------------------------
     # Build xr.Dataset
@@ -694,21 +632,16 @@ def _load_generator_and_fuel_yaml(
     n_s = len(scenario_labels)
 
     # -------------------------
-    # generator.investment.by_step.base
+    # generator.investment.by_step
     # -------------------------
     inv_block = gen.get("investment", None)
     if not isinstance(inv_block, dict):
         raise InputValidationError(f"{path.name}: missing/invalid generator.investment mapping.")
-    inv_by_step = inv_block.get("by_step", None)
-    if not isinstance(inv_by_step, dict):
-        raise InputValidationError(f"{path.name}: missing/invalid generator.investment.by_step mapping.")
-
-    base = inv_by_step.get("base", None)
-    if not isinstance(base, dict):
-        raise InputValidationError(
-            f"{path.name}: generator.investment.by_step.base missing/invalid "
-            "(steady_state expects 'base')."
-        )
+    step_label, base = _select_typical_year_step_block(
+        path=path,
+        by_step=inv_block.get("by_step", None),
+        context="generator.investment.by_step",
+    )
 
     # Keep the keys in ONE place and decide what is required
     GEN_INVESTMENT_REQUIRED = [
@@ -727,7 +660,7 @@ def _load_generator_and_fuel_yaml(
     missing = [k for k in GEN_INVESTMENT_REQUIRED if k not in base]
     if missing:
         raise InputValidationError(
-            f"{path.name}: generator.investment.by_step.base missing required key(s): {missing}. "
+            f"{path.name}: generator.investment.by_step['{step_label}'] missing required key(s): {missing}. "
             f"Found keys: {sorted(list(base.keys()))}"
         )
 
@@ -736,14 +669,14 @@ def _load_generator_and_fuel_yaml(
     for k in GEN_INVESTMENT_REQUIRED:
         inv_vals[k] = _as_float(
             base.get(k),
-            name=f"generator/investment/by_step/base/{k}",
+            name=f"generator/investment/by_step/{step_label}/{k}",
             default=0.0,
         )
     for k in GEN_INVESTMENT_OPTIONAL:
         # Optional: if missing or None -> default 0.0
         inv_vals[k] = _as_float(
             base.get(k, 0.0),
-            name=f"generator/investment/by_step/base/{k}",
+            name=f"generator/investment/by_step/{step_label}/{k}",
             default=0.0,
         )
 
@@ -774,30 +707,12 @@ def _load_generator_and_fuel_yaml(
         shared_curve_file = raw_shared_curve.strip()
 
     fom_value = float(inv_vals["fixed_om_share_per_year"])
-    legacy_curve_files: dict[str, Optional[str]] = {s: None for s in scenario_labels}
-    op_block = gen.get("operation", None)
-    if isinstance(op_block, dict):
-        op_by_scenario = op_block.get("by_scenario", None)
-        if not isinstance(op_by_scenario, dict):
-            raise InputValidationError(f"{path.name}: generator.operation.by_scenario missing/invalid.")
-        for i, s in enumerate(scenario_labels):
-            if s not in op_by_scenario:
-                raise InputValidationError(f"{path.name}: generator.operation.by_scenario missing scenario '{s}'.")
-            sb = op_by_scenario[s]
-            if not isinstance(sb, dict):
-                raise InputValidationError(f"{path.name}: generator.operation.by_scenario['{s}'] must be a dict.")
-            raw_curve = sb.get("efficiency_curve_csv", None)
-            legacy_curve_files[s] = raw_curve.strip() if isinstance(raw_curve, str) and raw_curve.strip() else None
-        shared_fom = _require_shared_legacy_scenario_value(
-            path=path,
-            by_scenario=op_by_scenario,
-            scenario_labels=scenario_labels,
-            key="fixed_om_share_per_year",
-            context="generator/operation/by_scenario",
-            optional=True,
-            default=fom_value,
+    if gen.get("operation", None) is not None:
+        raise InputValidationError(
+            f"{path.name}: the legacy `generator.operation` block is no longer supported in the steady_state "
+            "typical-year schema. Use `generator.technical.efficiency_curve_csv` for the shared curve file and "
+            "keep fixed O&M in `generator.investment.by_step.<step>`."
         )
-        fom_value = float(shared_fom if shared_fom is not None else fom_value)
 
     # -------------------------
     # fuel.by_scenario (steady_state)
@@ -907,15 +822,6 @@ def _load_generator_and_fuel_yaml(
         }
     )
     fuel_ds.attrs["fuel_label"] = str(fuel.get("label", "Fuel"))
-
-    if shared_curve_file is None:
-        legacy_unique = sorted({v for v in legacy_curve_files.values() if v})
-        if len(legacy_unique) > 1:
-            raise InputValidationError(
-                f"{path.name}: generator efficiency curves must now be technology-based. "
-                "Move `efficiency_curve_csv` to generator.technical and use one shared file across scenarios."
-            )
-        shared_curve_file = legacy_unique[0] if legacy_unique else None
 
     # -------------------------------------------------------------------------
     # Efficiency curve (optional): technology-based (curve_point,)

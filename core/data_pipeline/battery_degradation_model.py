@@ -211,11 +211,6 @@ def get_battery_degradation_settings(
         raise InputValidationError(
             "battery_model.degradation_model.cycle_lifetime_to_eol_cycles must be > 0."
         )
-    if calendar_fade_enabled and not calendar_curve_csv:
-        raise InputValidationError(
-            "battery_model.degradation_model.calendar_fade_enabled=true requires "
-            "battery_model.degradation_model.battery_calendar_fade_curve_csv."
-        )
     if calendar_time_increment_mode != "constant_per_year":
         raise InputValidationError(
             "battery_model.degradation_model.battery_calendar_time_increment_mode currently "
