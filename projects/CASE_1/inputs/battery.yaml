@@ -13,7 +13,6 @@ meta:
     battery_max_discharge_time_hours: hours
     battery_max_charge_time_hours: hours
     battery_max_installable_capacity_kwh: kWh
-    battery_efficiency_curve_csv: csv_path
   context:
     formulation: steady_state
     multi_scenario: false
@@ -50,9 +49,6 @@ meta:
       battery_max_installable_capacity_kwh: Optional upper bound on total installed
         battery capacity used as a planning/siting limit. It is not the physics reference
         for the current endogenous degradation model.
-      battery_efficiency_curve_csv: 'CSV file containing the battery charge/discharge
-        efficiency shape used by the advanced convex loss model. Preferred semantics:
-        normalized multipliers relative to the scalar efficiencies above.'
 battery:
   label: Battery
   investment:

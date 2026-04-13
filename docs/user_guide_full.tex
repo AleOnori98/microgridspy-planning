@@ -1,0 +1,976 @@
+\documentclass[11pt,a4paper]{report}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[a4paper,margin=2.5cm]{geometry}
+\usepackage{longtable}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{ltablex}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage[most]{tcolorbox}
+\usepackage{titlesec}
+\usepackage{setspace}
+\usepackage{parskip}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!50!black,
+  urlcolor=blue!50!black
+}
+
+\definecolor{codebg}{RGB}{247,247,247}
+\definecolor{notebg}{RGB}{245,249,255}
+\definecolor{noteedge}{RGB}{72,110,170}
+
+\lstdefinestyle{mgpy}{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{codebg},
+  frame=single,
+  framerule=0pt,
+  breaklines=true,
+  columns=fullflexible,
+  keepspaces=true
+}
+
+\newtcolorbox{guidenote}[1][]{
+  colback=notebg,
+  colframe=noteedge,
+  boxrule=0.6pt,
+  arc=2pt,
+  left=8pt,
+  right=8pt,
+  top=6pt,
+  bottom=6pt,
+  title=#1
+}
+
+\newcommand{\code}[1]{\texttt{#1}}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+
+\titleformat{\chapter}[display]
+  {\normalfont\bfseries}
+  {\chaptertitlename\ \thechapter}{10pt}{\Large}
+
+\title{MicroGridsPy Planning User Guide}
+\author{MicroGridsPy Planning}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+
+\part{Shared Platform Workflow}
+
+\chapter{Introduction}\label{sec:introduction}
+
+MicroGridsPy Planning is the planning module of the MicroGridsPy ecosystem. It is implemented as a Streamlit application backed by Linopy optimization and a project-folder workflow based on JSON, YAML, and CSV files.
+
+The application supports two complementary planning modes:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{Multi-Year}: an explicit dynamic formulation with year-by-year evolution, investment-step logic, and cohort-style capacity tracking over the planning horizon.
+  \item \textbf{Typical-Year}: a reduced steady-state formulation in which one representative operating year is repeated and investment decisions are evaluated in annuity form.
+\end{itemize}
+
+This guide adopts the Multi-Year workflow as the \emph{reference} implementation. Shared workflow, interface, directory, input, and conditional-feature logic are therefore defined once in the Multi-Year chapters. The Typical-Year chapters later describe only the simplifications and differences required when the reduced formulation is selected.
+
+\begin{guidenote}[Reference framing]
+In the current implementation, Multi-Year is the general planning mode and Typical-Year is its reduced special case. When a concept exists in both modes, this guide defines it in the Multi-Year chapters first and then refers back to it from the Typical-Year chapters.
+\end{guidenote}
+
+\chapter{General Workflow}\label{sec:general-workflow}
+
+The minimum workflow for any project is:
+
+\begin{enumerate}[leftmargin=1.5em]
+  \item Launch the Streamlit application and open \textbf{Project Setup}.
+  \item Create a project folder under \path{projects/<project\_name>/}.
+  \item Select the planning formulation.
+  \item Configure the high-level project settings that determine which templates are generated.
+  \item Click \textbf{Initialize project and generate templates}.
+  \item Edit the generated input files under \path{projects/<project\_name>/inputs/}.
+  \item Open \textbf{Data Audit and Visualization} to confirm that the dataset loads and the dimensions match the intended study.
+  \item Open \textbf{Model Optimization} and solve the model.
+  \item Open \textbf{Results} to inspect sizing, operation, costs, emissions, and exported files.
+\end{enumerate}
+
+This workflow is shared by both planning modes. The main differences lie in how the formulation is initialized and in how years, investment steps, and time-series inputs are organized.
+
+\chapter{Streamlit Interface}\label{sec:streamlit-interface}
+
+\section{Home}
+
+\path{Home.py} is the landing page. It links to:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item \path{pages/0\_Project\_Setup.py}
+  \item \path{pages/1\_Data\_Audit\_and\_Visualization.py}
+  \item \path{pages/3\_Optimization.py}
+  \item \path{pages/4\_Results.py}
+\end{itemize}
+
+The Home page introduces the two formulations at a high level but does not configure the model directly.
+
+\section{Project Setup}
+
+This page creates or loads projects.
+
+\subsection{Create tab}
+
+The Create tab controls:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item project name and description,
+  \item formulation selection,
+  \item grid and export settings,
+  \item renewable-resource count and labels,
+  \item uncertainty settings,
+  \item battery and generator advanced-model options,
+  \item optimization constraints,
+  \item template generation.
+\end{itemize}
+
+\subsection{Load tab}
+
+The Load tab marks an existing project as active without regenerating inputs.
+
+\begin{guidenote}[Important behavior]
+If a project is created with a name that already exists, the generated files in \path{inputs/} are overwritten using the current Project Setup selections. Existing user-edited inputs should therefore be backed up or reviewed before regeneration.
+\end{guidenote}
+
+\section{Data Audit and Visualization}
+
+This page reads \path{inputs/formulation.json}, initializes the formulation-specific sets, loads the canonical project dataset, and displays:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item required and optional input-file status,
+  \item dataset-loading status,
+  \item coordinate summaries,
+  \item parameter summaries,
+  \item optimization-constraint summaries,
+  \item advanced-curve diagnostics,
+  \item grid-availability controls for on-grid projects,
+  \item time-series plots.
+\end{itemize}
+
+For on-grid projects, \path{grid\_availability.csv} is treated as a derived artifact and can be regenerated from \path{grid.yaml}.
+
+\section{Model Optimization}
+
+This page:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item requires an active project,
+  \item reads \path{inputs/formulation.json},
+  \item builds the formulation-specific optimization model,
+  \item lets the user select \code{highs} or \code{gurobi},
+  \item optionally writes a problem file,
+  \item stores a solver log under \path{projects/<project\_name>/logs/},
+  \item solves the single-objective planning problem.
+\end{itemize}
+
+\section{Results}
+
+This page dispatches to the formulation-specific results renderer. Depending on the active mode, it displays sizing, key performance indicators, operational summaries, economic breakdowns, and exported CSV or Excel artifacts.
+
+\part{Multi-Year Planning Mode}
+
+\chapter{Multi-Year Overview}\label{sec:multi-year-overview}
+
+Multi-Year is implemented as \code{core\_formulation = "dynamic"}. It is the general planning workflow in the current codebase.
+
+Compared with Typical-Year, Multi-Year is structurally richer because it makes the following dimensions explicit:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item \code{year}: modeled years over the project horizon,
+  \item \code{inv\_step}: investment steps and commissioning cohorts,
+  \item \code{scenario}: uncertainty branches,
+  \item \code{resource}: renewable-resource labels,
+  \item \code{period}: hourly periods within the representative operating year.
+\end{itemize}
+
+The Multi-Year formulation should be used when the study requires explicit year evolution, time-dependent fuel prices or grid conditions, investment sequencing, battery degradation tracking, or cohort-aware capacity accounting.
+
+\chapter{Multi-Year Initialization Logic}\label{sec:multi-year-init}
+
+\section{Formulation switch}
+
+Project Setup activates Multi-Year by writing
+\code{core\_formulation = "dynamic"} to \path{inputs/formulation.json}.
+
+The Multi-Year set initializer then derives:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item \code{period = 0,\dots,8759},
+  \item \code{year = [start\_year\_label, start\_year\_label + 1, \dots]},
+  \item \code{scenario = scenario labels},
+  \item \code{resource = renewable-resource labels},
+  \item \code{inv\_step = [1]} if capacity expansion is disabled,
+  \item \code{inv\_step = [1,2,\dots,N]} if capacity expansion is enabled.
+\end{itemize}
+
+\section{Year labels}
+
+The current implementation requires:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item \code{start\_year\_label} to be integer-like,
+  \item \code{time\_horizon\_years} to be a positive integer.
+\end{itemize}
+
+If \code{start\_year\_label = 2026} and \code{time\_horizon\_years = 10}, the modeled years are:
+\code{2026, 2027, \dots, 2035}.
+
+Those labels are then reused consistently in CSV headers, yearly fuel-price lists, grid-connection timing, and yearly result exports.
+
+\section{Capacity expansion and investment steps}
+
+If \code{capacity\_expansion = false}, there is one investment step only and generated YAML templates use a single \code{"1"} block under \code{investment.by\_step}.
+
+If \code{capacity\_expansion = true}, the UI requires \code{investment\_steps\_years}, for example \code{[5,5]}. The initializer then constructs:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item \code{inv\_step = [1,2]},
+  \item \code{inv\_step\_start\_year = [2026,2031]},
+  \item \code{inv\_step\_end\_year = [2030,2035]},
+  \item \code{inv\_step\_len\_years = [5,5]},
+  \item \code{year\_inv\_step[year]},
+  \item \code{inv\_active\_in\_year[inv\_step, year]}.
+\end{itemize}
+
+\begin{guidenote}[Capacity expansion and cohorts]
+In the current backend, investment-side parameters may vary by \code{inv\_step}, but technical parameters remain shared across steps. Capacity commissioned in a step becomes a cohort or vintage tracked through later years, while the underlying technology definition stays shared.
+\end{guidenote}
+
+\section{Canonical step-key convention}
+
+The current user-facing Multi-Year templates use canonical numeric step labels:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item \code{"1"} for the single-step case,
+  \item \code{"1"}, \code{"2"}, \dots for multi-step cases.
+\end{itemize}
+
+The loader still accepts lightweight legacy aliases such as \code{step\_1} and, for single-step projects only, \code{base}. New inputs should follow the numeric convention directly.
+
+\section{Scenarios and scenario weights}
+
+If multi-scenario mode is disabled, the application uses a single scenario, typically \code{scenario\_1}. If it is enabled, \code{multi\_scenario.scenario\_labels} defines the ordered labels and \code{multi\_scenario.scenario\_weights} defines the scenario weights. All scenario-dependent CSV headers and YAML mappings must use the same labels.
+
+\chapter{Multi-Year Project Directory}\label{sec:multi-year-directory}
+
+The representative Multi-Year project structure is:
+
+\begin{lstlisting}[style=mgpy]
+projects/
+  <project_name>/
+    inputs/
+      formulation.json
+      README_inputs.md
+      load_demand.csv
+      resource_availability.csv
+      renewables.yaml
+      battery.yaml
+      generator.yaml
+      grid.yaml                       # only if on-grid
+      grid_import_price.csv           # only if on-grid
+      grid_export_price.csv           # only if on-grid and export enabled
+      grid_availability.csv           # derived, backend-generated
+      battery_efficiency_curve.csv    # only if convex battery loss is enabled
+      battery_calendar_fade_curve.csv # only if calendar fade is enabled
+      generator_efficiency_curve.csv  # only if generator curve mode is enabled
+    logs/
+    results/
+      multi_year/
+        dispatch_timeseries.csv
+        energy_balance.csv
+        design_by_step.csv
+        kpis_yearly.csv
+        cashflows_discounted.csv
+        scenario_costs_yearly.csv
+        results_multi_year.xlsx
+\end{lstlisting}
+
+\section{Auto-generated and user-maintained files}
+
+\begin{itemize}[leftmargin=1.5em]
+  \item Auto-generated: \path{formulation.json}, \path{README\_inputs.md}, the primary input templates, solver logs, and result exports.
+  \item Derived: \path{grid\_availability.csv} for on-grid projects.
+  \item User-edited: the primary input templates under \path{inputs/}, except \path{grid\_availability.csv}.
+\end{itemize}
+
+\chapter{Multi-Year Input Files}\label{sec:multi-year-inputs}
+
+\section{Master file table}
+
+\begin{longtable}{p{0.18\textwidth}p{0.11\textwidth}p{0.12\textwidth}p{0.18\textwidth}p{0.10\textwidth}p{0.22\textwidth}}
+\toprule
+\textbf{File} & \textbf{Format} & \textbf{Mandatory} & \textbf{When used} & \textbf{Edited by user} & \textbf{Dimensional meaning} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{File} & \textbf{Format} & \textbf{Mandatory} & \textbf{When used} & \textbf{Edited by user} & \textbf{Dimensional meaning} \\
+\midrule
+\endhead
+\path{formulation.json} & JSON & Yes & always & normally no & project-level flags, horizon, scenarios, constraints \\
+\path{load_demand.csv} & CSV & Yes & always & Yes & hourly demand by scenario and year \\
+\path{resource_availability.csv} & CSV & Yes & always & Yes & hourly renewable availability by scenario, year, and resource \\
+\path{renewables.yaml} & YAML & Yes & always & Yes & renewable investment by step and shared technical data \\
+\path{battery.yaml} & YAML & Yes & always & Yes & battery investment by step and shared technical and degradation data \\
+\path{generator.yaml} & YAML & Yes & always & Yes & generator investment by step, shared technical data, yearly fuel prices \\
+\path{grid.yaml} & YAML & Conditional & on-grid only & Yes & grid line, outages, renewable share, emissions, connection timing \\
+\path{grid_import_price.csv} & CSV & Conditional & on-grid only & Yes & hourly import tariff by scenario and year \\
+\path{grid_export_price.csv} & CSV & Conditional & export enabled & Yes & hourly export tariff by scenario and year \\
+\path{grid_availability.csv} & CSV & Derived & on-grid only & No & backend-generated hourly availability by scenario and year \\
+\path{battery_efficiency_curve.csv} & CSV & Conditional & convex battery loss & Yes & battery power-efficiency curve \\
+\path{battery_calendar_fade_curve.csv} & CSV & Conditional & calendar fade enabled & Yes & calendar-ageing curve by average yearly state of charge \\
+\path{generator_efficiency_curve.csv} & CSV & Conditional & generator curve mode & Yes & generator partial-load efficiency curve \\
+\path{README_inputs.md} & Markdown & No & always & No & human-readable summary only \\
+\bottomrule
+\end{longtable}
+
+\section{\path{inputs/formulation.json}}
+
+This file is written by Project Setup and read by the pages, set initializer, and Multi-Year data loader.
+
+\begin{longtable}{p{0.34\textwidth}p{0.20\textwidth}p{0.10\textwidth}p{0.10\textwidth}p{0.18\textwidth}}
+\toprule
+\textbf{Path} & \textbf{Meaning} & \textbf{Type} & \textbf{Unit} & \textbf{Notes} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Path} & \textbf{Meaning} & \textbf{Type} & \textbf{Unit} & \textbf{Notes} \\
+\midrule
+\endhead
+\code{core\_formulation} & formulation switch & string & -- & must be \code{"dynamic"} \\
+\code{system\_type} & UI-level system type & string & -- & \code{"off\_grid"} or \code{"on\_grid"} \\
+\code{on\_grid} & grid activation flag & bool & -- & used directly by loader logic \\
+\code{grid\_allow\_export} & export activation flag & bool & -- & controls export variables and file generation \\
+\code{unit\_commitment} & integer sizing toggle & bool & -- & in current code this means integer sizing, not chronological unit commitment \\
+\code{start\_year\_label} & first modeled year label & int-like string or int & year & must be parseable as a positive integer \\
+\code{time\_horizon\_years} & modeled horizon length & int & years & positive integer \\
+\code{social\_discount\_rate} & social discount rate & number & share & used in objective accounting and reporting \\
+\code{capacity\_expansion} & capacity-expansion toggle & bool & -- & activates multiple investment steps \\
+\code{investment\_steps\_years} & ordered list of step durations & list[int] or null & years & required when capacity expansion is enabled; sum must equal horizon length \\
+\code{multi\_scenario.enabled} & scenario replication flag & bool & -- & false means one scenario \\
+\code{multi\_scenario.n\_scenarios} & number of scenarios & int & -- & should match labels and weights \\
+\code{multi\_scenario.scenario\_labels} & scenario labels & list[str] & -- & must match CSV headers and YAML mappings \\
+\code{multi\_scenario.scenario\_weights} & scenario weights & list[number] & share & normalized by the loader \\
+\code{optimization\_constraints.enforcement} & scenario-enforcement mode & string & -- & \code{"scenario\_wise"} or \code{"expected"} \\
+\code{optimization\_constraints.min\_renewable\_penetration} & renewable-share floor & number & share & typically between 0 and 1 \\
+\code{optimization\_constraints.max\_lost\_load\_fraction} & unmet-load cap & number & share & typically between 0 and 1 \\
+\code{optimization\_constraints.lost\_load\_cost\_per\_kwh} & unmet-load penalty & number & currency/kWh & zero disables the economic penalty \\
+\code{optimization\_constraints.land\_availability\_m2} & land cap & number or null & m\textsuperscript{2} & null disables the land constraint \\
+\code{optimization\_constraints.emission\_cost\_per\_kgco2e} & emissions cost & number & currency/kgCO\textsubscript{2}e & applied in objective and reporting \\
+\code{system\_configuration.n\_sources} & renewable-resource count & int & -- & should match generated renewable entries \\
+\code{battery\_model.loss\_model} & battery loss formulation & string & -- & \code{"constant\_efficiency"} or \code{"convex\_loss\_epigraph"} \\
+\code{battery\_model.degradation\_model.cycle\_fade\_enabled} & cycle-fade toggle & bool & -- & valid in Multi-Year only with convex battery loss \\
+\code{battery\_model.degradation\_model.calendar\_fade\_enabled} & calendar-fade toggle & bool & -- & valid in Multi-Year only with convex battery loss \\
+\code{battery\_model.degradation\_model.*} other detailed fields & legacy detailed degradation inputs & mixed & mixed & current UI no longer writes battery-specific degradation data here; current workflow stores them in \path{battery.yaml} \\
+\code{generator\_model.efficiency\_model} & generator part-load formulation & string & -- & \code{"constant\_efficiency"} or \code{"efficiency\_curve"} \\
+\bottomrule
+\end{longtable}
+
+\section{\path{inputs/renewables.yaml}}
+
+Generated schema:
+
+\begin{lstlisting}[style=mgpy]
+renewables:
+  - id: res_1
+    conversion_technology: Solar_PV
+    resource: Solar
+    investment:
+      by_step:
+        "1":
+          nominal_capacity_kw: 1.0
+          specific_investment_cost_per_kw: 0.0
+          wacc: 0.0
+          grant_share_of_capex: 0.0
+          lifetime_years: 25
+          embedded_emissions_kgco2e_per_kw: 0.0
+          fixed_om_share_per_year: 0.0
+          production_subsidy_per_kwh: 0.0
+    technical:
+      inverter_efficiency: 1.0
+      specific_area_m2_per_kw: null
+      max_installable_capacity_kw: null
+      capacity_degradation_rate_per_year: 0.0
+\end{lstlisting}
+
+One entry is required for each renewable resource. The field \code{resource} must match the third header level of \path{resource\_availability.csv}.
+
+\begin{longtable}{p{0.34\textwidth}p{0.19\textwidth}p{0.09\textwidth}p{0.09\textwidth}p{0.23\textwidth}}
+\toprule
+\textbf{Path} & \textbf{Meaning} & \textbf{Type} & \textbf{Unit} & \textbf{Behavior and notes} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Path} & \textbf{Meaning} & \textbf{Type} & \textbf{Unit} & \textbf{Behavior and notes} \\
+\midrule
+\endhead
+\code{renewables[].id} & internal identifier & string & -- & informational only \\
+\code{renewables[].conversion\_technology} & technology label & string & -- & shared across steps and scenarios \\
+\code{renewables[].resource} & resource label & string & -- & must match \path{resource\_availability.csv} and the \code{resource} coordinate \\
+\code{renewables[].investment.by\_step.<step>.nominal\_capacity\_kw} & capacity per installed unit & number & kW & step-dependent \\
+\code{renewables[].investment.by\_step.<step>.specific\_investment\_cost\_per\_kw} & CAPEX intensity & number & currency/kW & step-dependent; annualized with WACC and lifetime \\
+\code{renewables[].investment.by\_step.<step>.wacc} & technology WACC & number & share & step-dependent \\
+\code{renewables[].investment.by\_step.<step>.grant\_share\_of\_capex} & CAPEX grant share & number & share & step-dependent \\
+\code{renewables[].investment.by\_step.<step>.lifetime\_years} & lifetime & number & years & step-dependent; used by replacement logic \\
+\code{renewables[].investment.by\_step.<step>.embedded\_emissions\_kgco2e\_per\_kw} & embodied emissions & number & kgCO\textsubscript{2}e/kW & step-dependent \\
+\code{renewables[].investment.by\_step.<step>.fixed\_om\_share\_per\_year} & fixed O\&M share & number & share/year & optional; defaults to 0.0 if omitted \\
+\code{renewables[].investment.by\_step.<step>.production\_subsidy\_per\_kwh} & operating subsidy & number & currency/kWh & optional; defaults to 0.0 if omitted \\
+\code{renewables[].technical.inverter\_efficiency} & conversion efficiency & number & -- & shared; usually in $(0,1]$ \\
+\code{renewables[].technical.specific\_area\_m2\_per\_kw} & land coefficient & number or null & m\textsuperscript{2}/kW & shared; needed in practice when land constraint is active \\
+\code{renewables[].technical.max\_installable\_capacity\_kw} & planning cap & number or null & kW & shared; null means no explicit cap \\
+\code{renewables[].technical.capacity\_degradation\_rate\_per\_year} & exogenous capacity fade & number & 1/year & optional; defaults to 0.0 \\
+\bottomrule
+\end{longtable}
+
+The current Multi-Year parser accepts the shared-technology schema only. Legacy branches such as top-level \code{by\_step}, \code{technical.by\_step}, and \code{operation} are no longer part of the current user workflow.
+
+\section{\path{inputs/battery.yaml}}
+
+Generated schema:
+
+\begin{lstlisting}[style=mgpy]
+battery:
+  label: Battery
+  investment:
+    by_step:
+      "1":
+        nominal_capacity_kwh: 1.0
+        specific_investment_cost_per_kwh: 0.0
+        wacc: 0.0
+        calendar_lifetime_years: 10
+        embedded_emissions_kgco2e_per_kwh: 0.0
+        fixed_om_share_per_year: 0.0
+  technical:
+    charge_efficiency: 0.95
+    discharge_efficiency: 0.96
+    initial_soc: 0.5
+    depth_of_discharge: 0.8
+    max_discharge_time_hours: 5.0
+    max_charge_time_hours: 5.0
+    max_installable_capacity_kwh: null
+    efficiency_curve_csv: battery_efficiency_curve.csv
+    capacity_degradation_rate_per_year: 0.0
+    initial_soh: 1.0
+    end_of_life_soh: 0.8
+    cycle_lifetime_to_eol_cycles: 6000.0
+    calendar_fade_curve_csv: battery_calendar_fade_curve.csv
+    calendar_time_increment_per_year: 1.0
+\end{lstlisting}
+
+\begin{longtable}{p{0.34\textwidth}p{0.19\textwidth}p{0.09\textwidth}p{0.09\textwidth}p{0.23\textwidth}}
+\toprule
+\textbf{Path} & \textbf{Meaning} & \textbf{Type} & \textbf{Unit} & \textbf{Behavior and notes} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Path} & \textbf{Meaning} & \textbf{Type} & \textbf{Unit} & \textbf{Behavior and notes} \\
+\midrule
+\endhead
+\code{battery.label} & battery label & string & -- & reporting only \\
+\code{battery.investment.by\_step.<step>.nominal\_capacity\_kwh} & energy capacity per installed unit & number & kWh & step-dependent \\
+\code{battery.investment.by\_step.<step>.specific\_investment\_cost\_per\_kwh} & CAPEX intensity & number & currency/kWh & step-dependent; annualized with WACC and lifetime \\
+\code{battery.investment.by\_step.<step>.wacc} & battery WACC & number & share & step-dependent \\
+\code{battery.investment.by\_step.<step>.calendar\_lifetime\_years} & replacement lifetime & number & years & step-dependent \\
+\code{battery.investment.by\_step.<step>.embedded\_emissions\_kgco2e\_per\_kwh} & embodied emissions & number & kgCO\textsubscript{2}e/kWh & step-dependent \\
+\code{battery.investment.by\_step.<step>.fixed\_om\_share\_per\_year} & fixed O\&M share & number & share/year & optional; defaults to 0.0 if omitted \\
+\code{battery.technical.charge\_efficiency} & one-way charge efficiency & number & -- & shared across steps \\
+\code{battery.technical.discharge\_efficiency} & one-way discharge efficiency & number & -- & shared across steps \\
+\code{battery.technical.initial\_soc} & initial state of charge & number & share & shared \\
+\code{battery.technical.initial\_soh} & initial state of health & number & share & required when endogenous degradation is enabled in current generated workflow \\
+\code{battery.technical.depth\_of\_discharge} & usable fraction of nominal capacity & number & share & shared \\
+\code{battery.technical.max\_discharge\_time\_hours} & discharge-time proxy & number & h & shared \\
+\code{battery.technical.max\_charge\_time\_hours} & charge-time proxy & number & h & shared \\
+\code{battery.technical.max\_installable\_capacity\_kwh} & planning cap & number or null & kWh & shared; null means no explicit cap \\
+\code{battery.technical.efficiency\_curve\_csv} & battery loss-curve filename & string or null & path & required when convex battery loss is selected \\
+\code{battery.technical.capacity\_degradation\_rate\_per\_year} & exogenous capacity fade & number & 1/year & used unless calendar fade is enabled; then internally suppressed \\
+\code{battery.technical.end\_of\_life\_soh} & end-of-life state of health & number & share & conditional; used for endogenous degradation \\
+\code{battery.technical.cycle\_lifetime\_to\_eol\_cycles} & cycle life to end of life & number & cycles & conditional; used when cycle fade is enabled \\
+\code{battery.technical.calendar\_fade\_curve\_csv} & calendar-fade filename & string & path & conditional; used when calendar fade is enabled \\
+\code{battery.technical.calendar\_time\_increment\_per\_year} & calendar-ageing increment & number & increment/year & conditional; current code supports constant-per-year mode only \\
+\bottomrule
+\end{longtable}
+
+\begin{guidenote}[Battery degradation ownership]
+The current user-facing workflow separates high-level activation flags from battery-specific degradation data. \path{formulation.json} activates cycle fade and calendar fade, while \path{battery.yaml} stores the battery's actual degradation parameters such as \code{initial\_soh}, end-of-life state of health, cycle lifetime, and calendar-fade file paths.
+\end{guidenote}
+
+\section{\path{inputs/generator.yaml}}
+
+Generated schema:
+
+\begin{lstlisting}[style=mgpy]
+generator:
+  label: Generator
+  investment:
+    by_step:
+      "1":
+        nominal_capacity_kw: 1.0
+        lifetime_years: 10
+        specific_investment_cost_per_kw: 0.0
+        wacc: 0.0
+        embedded_emissions_kgco2e_per_kw: 0.0
+        fixed_om_share_per_year: 0.0
+  technical:
+    nominal_efficiency_full_load: 0.30
+    efficiency_curve_csv: generator_efficiency_curve.csv
+    max_installable_capacity_kw: null
+    capacity_degradation_rate_per_year: 0.0
+fuel:
+  label: Fuel
+  technical:
+    lhv_kwh_per_unit_fuel: 0.0
+    direct_emissions_kgco2e_per_unit_fuel: 0.0
+  cost:
+    by_scenario:
+      scenario_1:
+        by_year_cost_per_unit_fuel: [0.0, 0.0]
+\end{lstlisting}
+
+\begin{longtable}{p{0.34\textwidth}p{0.19\textwidth}p{0.09\textwidth}p{0.09\textwidth}p{0.23\textwidth}}
+\toprule
+\textbf{Path} & \textbf{Meaning} & \textbf{Type} & \textbf{Unit} & \textbf{Behavior and notes} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Path} & \textbf{Meaning} & \textbf{Type} & \textbf{Unit} & \textbf{Behavior and notes} \\
+\midrule
+\endhead
+\code{generator.label} & generator label & string & -- & reporting only \\
+\code{generator.investment.by\_step.<step>.nominal\_capacity\_kw} & capacity per installed unit & number & kW & step-dependent \\
+\code{generator.investment.by\_step.<step>.lifetime\_years} & lifetime & number & years & step-dependent \\
+\code{generator.investment.by\_step.<step>.specific\_investment\_cost\_per\_kw} & CAPEX intensity & number & currency/kW & step-dependent \\
+\code{generator.investment.by\_step.<step>.wacc} & generator WACC & number & share & step-dependent \\
+\code{generator.investment.by\_step.<step>.embedded\_emissions\_kgco2e\_per\_kw} & embodied emissions & number & kgCO\textsubscript{2}e/kW & step-dependent \\
+\code{generator.investment.by\_step.<step>.fixed\_om\_share\_per\_year} & fixed O\&M share & number & share/year & optional; defaults to 0.0 if omitted \\
+\code{generator.technical.nominal\_efficiency\_full\_load} & full-load efficiency & number & -- & shared across steps \\
+\code{generator.technical.efficiency\_curve\_csv} & curve filename & string or null & path & conditional; used when generator curve mode is active \\
+\code{generator.technical.max\_installable\_capacity\_kw} & planning cap & number or null & kW & shared; null means no explicit cap \\
+\code{generator.technical.capacity\_degradation\_rate\_per\_year} & exogenous capacity fade & number & 1/year & optional; defaults to 0.0 \\
+\code{fuel.label} & fuel label & string & -- & reporting only \\
+\code{fuel.technical.lhv\_kwh\_per\_unit\_fuel} & lower heating value & number & kWh/unit fuel & shared across steps and scenarios \\
+\code{fuel.technical.direct\_emissions\_kgco2e\_per\_unit\_fuel} & direct emissions factor & number & kgCO\textsubscript{2}e/unit fuel & shared across steps and scenarios \\
+\code{fuel.cost.by\_scenario.<scenario>.by\_year\_cost\_per\_unit\_fuel} & yearly fuel-price trajectory & list[number] & currency/unit fuel & scenario- and year-dependent; list length must equal horizon length \\
+\bottomrule
+\end{longtable}
+
+\section{\path{inputs/grid.yaml}}
+
+This file exists only if \code{on\_grid = true}.
+
+\begin{lstlisting}[style=mgpy]
+grid:
+  by_scenario:
+    scenario_1:
+      line:
+        capacity_kw: 0.0
+        transmission_efficiency: 1.0
+        renewable_share: 0.0
+        emissions_factor_kgco2e_per_kwh: 0.0
+      outages:
+        average_outages_per_year: 0.0
+        average_outage_duration_minutes: 0.0
+        outage_scale_od_hours: 0.6
+        outage_shape_od: 0.56
+        outage_seed: 0
+      first_year_connection: 2026
+\end{lstlisting}
+
+\begin{longtable}{p{0.34\textwidth}p{0.19\textwidth}p{0.09\textwidth}p{0.09\textwidth}p{0.23\textwidth}}
+\toprule
+\textbf{Path} & \textbf{Meaning} & \textbf{Type} & \textbf{Unit} & \textbf{Behavior and notes} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Path} & \textbf{Meaning} & \textbf{Type} & \textbf{Unit} & \textbf{Behavior and notes} \\
+\midrule
+\endhead
+\code{grid.by\_scenario.<scenario>.line.capacity\_kw} & interconnection capacity & number & kW & scenario-dependent; same limit used for import and export \\
+\code{grid.by\_scenario.<scenario>.line.transmission\_efficiency} & delivery efficiency & number & -- & scenario-dependent; must stay in $[0,1]$ \\
+\code{grid.by\_scenario.<scenario>.line.renewable\_share} & renewable share of imported power & number & share & scenario-dependent; must stay in $[0,1]$ \\
+\code{grid.by\_scenario.<scenario>.line.emissions\_factor\_kgco2e\_per\_kwh} & grid import emissions factor & number & kgCO\textsubscript{2}e/kWh & scenario-dependent; non-negative \\
+\code{grid.by\_scenario.<scenario>.outages.average\_outages\_per\_year} & outage frequency & number & events/year & used by outage simulator \\
+\code{grid.by\_scenario.<scenario>.outages.average\_outage\_duration\_minutes} & outage duration & number & minutes & used by outage simulator \\
+\code{grid.by\_scenario.<scenario>.outages.outage\_scale\_od\_hours} & Weibull scale parameter & number & h & must be strictly positive \\
+\code{grid.by\_scenario.<scenario>.outages.outage\_shape\_od} & Weibull shape parameter & number & -- & must be strictly positive \\
+\code{grid.by\_scenario.<scenario>.outages.outage\_seed} & outage random seed & int-like number & seed & used for deterministic regeneration \\
+\code{grid.by\_scenario.<scenario>.first\_year\_connection} & first connected modeled year & year label, int, null, or blank & year & null or blank means connected from horizon start \\
+\bottomrule
+\end{longtable}
+
+\begin{guidenote}[Connection timing]
+The preferred input for \code{first\_year\_connection} is an exact label from the modeled \code{year} coordinate, for example \code{2031}. If it is after the last modeled year, grid availability remains zero for the whole horizon.
+\end{guidenote}
+
+\section{Informational files}
+
+\path{README\_inputs.md} is generated for human guidance only and is not parsed as a primary model input. YAML \code{meta} blocks, where present, are descriptive rather than structural.
+
+\chapter{Multi-Year Time-Series Structure}\label{sec:multi-year-ts}
+
+\section{\path{load_demand.csv}}
+
+This file uses a two-row header:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item row 1: scenario,
+  \item row 2: year.
+\end{itemize}
+
+The first column must be \code{meta/hour}. All scenario-year combinations must exist. The file must contain exactly 8760 rows and \code{meta/hour} must run from 0 to 8759. Values are hourly demand in kWh.
+
+\begin{lstlisting}[style=mgpy]
+meta,scenario_1,scenario_1
+hour,2026,2027
+0,15.2,16.0
+1,14.9,15.8
+\end{lstlisting}
+
+The loaded array has dimensions \code{(year, period, scenario)}.
+
+\section{\path{resource_availability.csv}}
+
+This file uses a three-row header:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item row 1: scenario,
+  \item row 2: year,
+  \item row 3: resource.
+\end{itemize}
+
+The first column is \code{("meta","hour","")}. All scenario-year-resource combinations must exist. The file must contain exactly 8760 rows. Values are intended as capacity factors close to the interval $[0,1]$, although the current loader tolerates a broader numeric bound.
+
+\begin{lstlisting}[style=mgpy]
+meta,scenario_1,scenario_1
+hour,2026,2026
+,Solar,Wind
+0,0.00,0.45
+1,0.00,0.43
+\end{lstlisting}
+
+The loaded array has dimensions \code{(year, period, scenario, resource)}.
+
+\section{\path{grid_import_price.csv} and \path{grid_export_price.csv}}
+
+These files follow the same two-row scenario/year header used by \path{load\_demand.csv}. They are required only for on-grid projects, with \path{grid\_export\_price.csv} additionally conditional on export being enabled. Values are expressed in currency per kWh.
+
+\section{\path{generator_efficiency_curve.csv}}
+
+Required columns are:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item \code{Relative Power Output [-]}
+  \item \code{Efficiency [-]}
+\end{itemize}
+
+Current accepted behavior:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item an explicit \code{0.0} row is optional,
+  \item at least one positive-load point is required,
+  \item the last relative-power point must be \code{1.0},
+  \item positive-load points must be strictly increasing,
+  \item efficiency values for positive-load points must be strictly positive.
+\end{itemize}
+
+The preferred interpretation is that \code{Efficiency [-]} is a normalized multiplier relative to \code{generator.technical.nominal\_efficiency\_full\_load}. Legacy absolute-efficiency curves are still accepted where supported by the parser.
+
+\section{\path{battery_efficiency_curve.csv}}
+
+Required columns are:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item \code{relative\_power\_pu}
+  \item \code{charge\_efficiency}
+  \item \code{discharge\_efficiency}
+\end{itemize}
+
+The file must contain at least two rows, \code{relative\_power\_pu} must be strictly increasing in the interval $(0,1]$, and the last point must be \code{1.0}. The preferred interpretation is that the charge and discharge columns are normalized multipliers around the scalar efficiencies declared in \path{battery.yaml}.
+
+\section{\path{battery_calendar_fade_curve.csv}}
+
+Required columns are:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item \code{soc\_pu}
+  \item preferred: \code{calendar\_fade\_coefficient\_per\_year}
+  \item legacy alias: \code{calendar\_fade\_coefficient\_per\_step}
+\end{itemize}
+
+The file must contain at least two rows. \code{soc\_pu} must lie in $[0,1]$. If the first point is above zero, the loader prepends a zero point automatically. The last \code{soc\_pu} point must be \code{1.0}. The coefficient is interpreted as a yearly calendar-ageing coefficient used together with \code{battery\_calendar\_time\_increment\_per\_year}.
+
+\section{\path{grid_availability.csv}}
+
+This file is derived rather than user-authored. It is regenerated from \path{grid.yaml} and the current Multi-Year sets. It uses the same two-row scenario/year header as the price files and represents binary hourly availability.
+
+\chapter{Multi-Year Conditional Features}\label{sec:multi-year-conditional}
+
+\section{On-grid mode}
+
+Activated by \code{on\_grid = true}. Additional required inputs are:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item \path{grid.yaml}
+  \item \path{grid\_import\_price.csv}
+  \item \path{grid\_export\_price.csv} if export is enabled
+\end{itemize}
+
+The derived file is \path{grid\_availability.csv}.
+
+\section{Export mode}
+
+Activated by \code{grid\_allow\_export = true}. This adds \path{grid\_export\_price.csv} and activates export-side variables in the optimization model.
+
+\section{Capacity expansion}
+
+Activated by \code{capacity\_expansion = true}. Renewable, battery, and generator templates then generate one \code{investment.by\_step} block per step, and the model tracks each commissioned cohort by \code{inv\_step}.
+
+\section{Multi-scenario mode}
+
+Activated by \code{multi\_scenario.enabled = true}. All hourly time-series CSVs must then contain every scenario-year combination. \code{fuel.cost.by\_scenario} and \code{grid.by\_scenario} must also cover every scenario label.
+
+\section{Battery convex loss model}
+
+Activated by \code{battery\_model.loss\_model = "convex\_loss\_epigraph"}. This requires \path{battery\_efficiency\_curve.csv} and switches the battery-loss representation from scalar efficiencies to a convex piecewise-linear surrogate based on DC-side relative power.
+
+\section{Battery endogenous degradation}
+
+Activated by convex battery loss together with either \code{cycle\_fade\_enabled} or \code{calendar\_fade\_enabled}. Additional battery inputs may include:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item \code{initial\_soh},
+  \item \code{end\_of\_life\_soh},
+  \item \code{cycle\_lifetime\_to\_eol\_cycles},
+  \item \path{battery\_calendar\_fade\_curve.csv},
+  \item \code{calendar\_time\_increment\_per\_year}.
+\end{itemize}
+
+Cycle fade and calendar fade are tracked as yearly degradation state variables. Replacement timing still follows the declared battery calendar lifetime.
+
+\section{Generator efficiency curve}
+
+Activated by \code{generator\_model.efficiency\_model = "efficiency\_curve"}. This requires \path{generator\_efficiency\_curve.csv} and converts the user curve into an internal convex fuel-use surrogate.
+
+\chapter{Multi-Year Consistency Checks}\label{sec:multi-year-checks}
+
+Before solving, verify the following:
+
+\begin{enumerate}[leftmargin=1.5em]
+  \item \code{start\_year\_label} is an integer-like calendar year.
+  \item If capacity expansion is enabled, \code{investment\_steps\_years} sums exactly to \code{time\_horizon\_years}.
+  \item Scenario labels match in \path{formulation.json}, CSV headers, \code{fuel.cost.by\_scenario}, and \code{grid.by\_scenario}.
+  \item Resource labels match between \code{renewables[].resource} and the third header row of \path{resource\_availability.csv}.
+  \item \code{fuel.cost.by\_scenario.<scenario>.by\_year\_cost\_per\_unit\_fuel} contains one value for every modeled year.
+  \item All hourly files contain exactly 8760 rows and the correct \code{meta/hour} sequence from 0 to 8759.
+  \item If on-grid mode is active, \code{first\_year\_connection} uses an exact modeled year label whenever possible.
+  \item If land constraints are active, every renewable entry provides a meaningful \code{specific\_area\_m2\_per\_kw}.
+  \item If convex battery loss is active, \code{battery.technical.efficiency\_curve\_csv} points to an existing curve file.
+  \item If battery calendar fade is enabled, \path{battery\_calendar\_fade\_curve.csv} is present and the calendar time increment uses the supported constant-per-year semantics.
+  \item If generator curve mode is active, the generator curve ends at relative power \code{1.0}.
+  \item Do not try to make technical parameters vary by investment step. The current Multi-Year backend assumes shared technical parameters across steps.
+\end{enumerate}
+
+\chapter{Multi-Year Minimal Examples}\label{sec:multi-year-examples}
+
+\section{Example A: simplest off-grid Multi-Year case}
+
+This is the smallest dynamic project that still exercises the Multi-Year machinery:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item \code{core\_formulation = "dynamic"}
+  \item \code{system\_type = "off\_grid"}
+  \item \code{on\_grid = false}
+  \item \code{capacity\_expansion = false}
+  \item \code{start\_year\_label = 2026}
+  \item \code{time\_horizon\_years = 10}
+  \item \code{multi\_scenario.enabled = false}
+  \item one renewable resource
+  \item battery loss model = \code{constant\_efficiency}
+  \item generator efficiency model = \code{constant\_efficiency}
+\end{itemize}
+
+Required files are \path{formulation.json}, \path{load\_demand.csv}, \path{resource\_availability.csv}, \path{renewables.yaml}, \path{battery.yaml}, and \path{generator.yaml}. In the single-step case, each component uses one \code{"1"} investment block.
+
+\section{Example B: richer on-grid Multi-Year case}
+
+This configuration exercises most dynamic features:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item \code{core\_formulation = "dynamic"}
+  \item \code{system\_type = "on\_grid"}
+  \item \code{on\_grid = true}
+  \item \code{grid\_allow\_export = true}
+  \item \code{capacity\_expansion = true}
+  \item \code{investment\_steps\_years = [5,5]}
+  \item \code{start\_year\_label = 2026}
+  \item \code{time\_horizon\_years = 10}
+  \item optional multiple scenarios
+  \item optional convex battery loss and endogenous degradation
+  \item optional generator efficiency curve
+\end{itemize}
+
+Additional required files are \path{grid.yaml}, \path{grid\_import\_price.csv}, \path{grid\_export\_price.csv}, and any active advanced-curve files.
+
+\part{Typical-Year Planning Mode}
+
+\chapter{Typical-Year Overview}\label{sec:typical-overview}
+
+Typical-Year is implemented as \code{core\_formulation = "steady\_state"}. It uses the same application pages and the same general project workflow defined in Part~I, but it collapses the dynamic structure into a representative-year planning problem.
+
+Conceptually, Typical-Year is a reduced special case of the Multi-Year workflow described in Part~II:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item the operating year is represented once and repeated conceptually,
+  \item investment costs are annualized directly,
+  \item the objective minimizes expected equivalent annual cost,
+  \item scenarios may differ operationally while sharing the same design decisions.
+\end{itemize}
+
+\begin{guidenote}[Typical-Year simplification]
+Typical-Year follows the same platform workflow, file layout, and component logic described for Multi-Year, but removes explicit year evolution, explicit investment-step dynamics, and battery-degradation state tracking across years.
+\end{guidenote}
+
+\chapter{Differences from Multi-Year}\label{sec:typical-differences}
+
+This chapter lists only the differences from the reference Multi-Year workflow in Sections~\ref{sec:multi-year-init} to~\ref{sec:multi-year-examples}.
+
+\section{Initialization differences}
+
+When Typical-Year is selected, Project Setup writes:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item \code{core\_formulation = "steady\_state"},
+  \item \code{start\_year\_label = "typical\_year"}.
+\end{itemize}
+
+There is no dynamic horizon and no explicit Multi-Year cohort accounting in the optimization path. The representative year is indexed by the single label \code{typical\_year}.
+
+\section{Investment-step simplification}
+
+Typical-Year still uses the same YAML nesting concept, namely \code{investment.by\_step}, but only one step is relevant. Current Typical-Year templates keep the single-step key \code{base}. The Typical-Year parsers also accept a single non-\code{base} step block when only one block is present.
+
+\section{CSV simplification}
+
+Typical-Year uses the same CSV file families described in Chapter~\ref{sec:multi-year-ts}, with the following simplifications:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item the year header is the single label \code{typical\_year},
+  \item there is no explicit dynamic year expansion,
+  \item fuel prices are scalar scenario values rather than yearly trajectories,
+  \item grid connection timing by explicit year does not apply.
+\end{itemize}
+
+\section{YAML simplification}
+
+Typical-Year reuses the same component files described in Chapter~\ref{sec:multi-year-inputs}, with the following simplifications:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item investment data are single-step rather than step-dependent over a horizon,
+  \item battery degradation inputs such as \code{initial\_soh}, calendar-fade curves, and endogenous year-to-year degradation states are not part of the current Typical-Year workflow,
+  \item generator fuel data use scenario-based scalar fuel costs rather than yearly price lists,
+  \item \code{first\_year\_connection} is not used because the representative-year formulation does not model explicit calendar years.
+\end{itemize}
+
+\section{Conditional-feature simplification}
+
+Most conditional features remain conceptually the same as in Chapter~\ref{sec:multi-year-conditional}. The main formulation-specific simplifications are:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item convex battery loss remains available,
+  \item generator efficiency curves remain available,
+  \item explicit battery endogenous degradation is not part of the current Typical-Year user workflow,
+  \item capacity expansion and year-dependent cohort logic are not active in the optimization path.
+\end{itemize}
+
+\section{Consistency-check differences}
+
+In addition to the shared file-consistency checks inherited from Chapter~\ref{sec:multi-year-checks}, the Typical-Year user should verify:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item all time-series files use the single year header \code{typical\_year},
+  \item only one investment block is provided in each component file,
+  \item on-grid projects provide the required grid-price templates but do not attempt to declare dynamic first-connection years,
+  \item dynamic battery-degradation inputs are not introduced into Typical-Year files.
+\end{itemize}
+
+\part{Appendices}
+
+\appendix
+
+\chapter{Glossary}\label{sec:appendix-glossary}
+
+\begin{longtable}{p{0.22\textwidth}p{0.70\textwidth}}
+\toprule
+\textbf{Term} & \textbf{Meaning in current implementation} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Term} & \textbf{Meaning in current implementation} \\
+\midrule
+\endhead
+\code{year} & explicit modeled year label, usually a calendar year such as \code{2026}; in Typical-Year this collapses to \code{typical\_year} \\
+\code{period} & hourly index within the representative operating year, \code{0,\dots,8759} \\
+\code{scenario} & uncertainty branch with shared design decisions and different operating conditions \\
+\code{inv\_step} & investment step and commissioning cohort index \\
+\code{resource} & renewable-resource label used in sets and time-series headers \\
+cohort / vintage & capacity commissioned in an investment step and then tracked through later years \\
+shared-technology model & current Multi-Year interpretation in which investment terms may vary by step but technical parameters remain shared \\
+capacity expansion & activation of multiple investment steps over a dynamic horizon \\
+\bottomrule
+\end{longtable}
+
+\chapter{UI Mapping}\label{sec:appendix-ui}
+
+\begin{longtable}{p{0.32\textwidth}p{0.60\textwidth}}
+\toprule
+\textbf{UI choice} & \textbf{Effect} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{UI choice} & \textbf{Effect} \\
+\midrule
+\endhead
+Multi-Year formulation & writes \code{core\_formulation = "dynamic"} \\
+Typical-Year formulation & writes \code{core\_formulation = "steady\_state"} \\
+Start year and horizon & set the Multi-Year \code{year} coordinate and year headers \\
+Capacity expansion enabled & generates multiple \code{investment.by\_step} blocks in Multi-Year \\
+On-grid mode & generates \path{grid.yaml} and \path{grid\_import\_price.csv} \\
+Export enabled & also generates \path{grid\_export\_price.csv} \\
+Multi-scenario mode & replicates scenario labels across CSV headers and scenario-keyed YAML mappings \\
+Battery loss model = \code{convex\_loss\_epigraph} & generates the battery efficiency-curve template and activates curve-based loader logic \\
+Battery calendar fade enabled & generates the calendar-fade curve template and writes calendar-fade battery fields \\
+Generator efficiency model = \code{efficiency\_curve} & generates the generator efficiency-curve template and writes its filename into \path{generator.yaml} \\
+\bottomrule
+\end{longtable}
+
+\chapter{Source Basis}\label{sec:appendix-sources}
+
+This unified guide was reconstructed from the current repository implementation, especially:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item \path{pages/0\_Project\_Setup.py}
+  \item \path{pages/1\_Data\_Audit\_and\_Visualization.py}
+  \item \path{pages/3\_Optimization.py}
+  \item \path{pages/4\_Results.py}
+  \item \path{core/io/templates.py}
+  \item \path{core/multi\_year\_model/sets.py}
+  \item \path{core/multi\_year\_model/data.py}
+  \item \path{core/data\_pipeline/battery\_loss\_model.py}
+  \item \path{core/data\_pipeline/battery\_degradation\_model.py}
+  \item \path{core/data\_pipeline/battery\_calendar\_fade\_model.py}
+  \item \path{core/data\_pipeline/generator\_partial\_load\_model.py}
+\end{itemize}
+
+When code, template comments, and older prose diverged, this guide followed the current implementation and the current generated-template workflow.
+
+\end{document}

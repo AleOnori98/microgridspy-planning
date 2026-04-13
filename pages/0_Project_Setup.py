@@ -72,7 +72,6 @@ K = {
     "battery_calendar_fade_enabled": "gp_battery_calendar_fade_enabled",  # bool
     "battery_calendar_fade_curve_csv": "gp_battery_calendar_fade_curve_csv",  # str
     "battery_calendar_time_increment": "gp_battery_calendar_time_increment",  # float
-    "battery_initial_soh": "gp_battery_initial_soh",  # float
     "battery_end_of_life_soh": "gp_battery_end_of_life_soh",  # float
     "generator_label": "gp_generator_label",  # str
     "generator_efficiency_model": "gp_generator_efficiency_model",  # str
@@ -143,7 +142,6 @@ class PageConfig:
     battery_calendar_fade_enabled: bool
     battery_calendar_fade_curve_csv: str
     battery_calendar_time_increment_per_step: float
-    battery_initial_soh: float
     battery_end_of_life_soh: float
     generator_label: str
     generator_efficiency_model: str
@@ -232,7 +230,6 @@ def init_session_state_defaults() -> None:
         K["battery_calendar_fade_enabled"]: False,
         K["battery_calendar_fade_curve_csv"]: "battery_calendar_fade_curve.csv",
         K["battery_calendar_time_increment"]: 1.0,
-        K["battery_initial_soh"]: 1.0,
         K["battery_end_of_life_soh"]: 0.8,
         K["generator_label"]: "Generator",
         K["generator_efficiency_model"]: "constant_efficiency",
@@ -292,32 +289,7 @@ def write_formulation_file(*, project_name: str, project_description: str, cfg: 
             "loss_model": str(cfg.battery_loss_model or "constant_efficiency"),
             "degradation_model": {
                 "cycle_fade_enabled": battery_cycle_fade_active,
-                **(
-                    {
-                        "cycle_lifetime_to_eol_cycles": float(cfg.battery_cycle_lifetime_to_eol_cycles),
-                    }
-                    if battery_cycle_fade_active
-                    else {}
-                ),
                 "calendar_fade_enabled": battery_calendar_fade_active,
-                **(
-                    {"initial_soh": float(cfg.battery_initial_soh), "end_of_life_soh": float(cfg.battery_end_of_life_soh)}
-                    if (battery_cycle_fade_active or battery_calendar_fade_active)
-                    else {}
-                ),
-                **(
-                    {
-                        "battery_calendar_fade_curve_csv": str(
-                            cfg.battery_calendar_fade_curve_csv or "battery_calendar_fade_curve.csv"
-                        ),
-                        "battery_calendar_time_increment_mode": "constant_per_year",
-                        "battery_calendar_time_increment_per_year": float(
-                            cfg.battery_calendar_time_increment_per_step
-                        ),
-                    }
-                    if battery_calendar_fade_active
-                    else {}
-                ),
             },
         },
         "generator_model": {
@@ -379,7 +351,6 @@ def create_or_overwrite_project(*, project_name: str, project_description: str, 
         battery_cycle_lifetime_to_eol_cycles=cfg.battery_cycle_lifetime_to_eol_cycles,
         battery_calendar_fade_curve_csv=cfg.battery_calendar_fade_curve_csv,
         battery_calendar_time_increment_per_step=cfg.battery_calendar_time_increment_per_step,
-        battery_initial_soh=cfg.battery_initial_soh,
         battery_end_of_life_soh=cfg.battery_end_of_life_soh,
         generator_label=cfg.generator_label,
         generator_efficiency_model=cfg.generator_efficiency_model,
@@ -530,13 +501,25 @@ def render_formulation_section() -> Tuple[str, bool, str | None, int | None, flo
     st.markdown("**Time horizon & discounting**")
     col1, col2 = st.columns(2)
     with col1:
-        start_year = st.text_input(
-            "Project start year (label)",
-            value=str(st.session_state[K["start_year_label"]]),
-            help="First year of the planning horizon. Used for labeling and time series templates.",
+        start_year_default = st.session_state.get(K["start_year_label"], str(datetime.now().year))
+        try:
+            start_year_default_int = int(str(start_year_default).strip())
+        except Exception:
+            start_year_default_int = int(datetime.now().year)
+        start_year = int(
+            st.number_input(
+            "Project start year",
+            min_value=1,
+            step=1,
+            value=start_year_default_int,
+            help=(
+                "First modeled calendar year. Multi-year projects currently require integer year labels; "
+                "this value is used directly in the year coordinate and in generated time-series headers."
+            ),
             key="gp_start_year_label_input",
+            )
         )
-        st.session_state[K["start_year_label"]] = start_year
+        st.session_state[K["start_year_label"]] = str(start_year)
 
     with col2:
         horizon_years = int(
@@ -575,7 +558,7 @@ def render_formulation_section() -> Tuple[str, bool, str | None, int | None, flo
     st.session_state[K["cap_expansion"]] = bool(cap_expansion)
 
     if not cap_expansion:
-        return formulation, True, start_year, horizon_years, discount_rate_dec, False, None
+        return formulation, True, str(start_year), horizon_years, discount_rate_dec, False, None
 
     st.info(
         "Shared-technology capacity expansion is used: future expansion can add more capacity over time, but the "
@@ -636,7 +619,7 @@ def render_formulation_section() -> Tuple[str, bool, str | None, int | None, flo
         st.stop()
 
     st.caption(f"Total duration: **{total_years}** years across **{n_steps}** steps.")
-    return formulation, True, start_year, horizon_years, discount_rate_dec, True, step_years_list
+    return formulation, True, str(start_year), horizon_years, discount_rate_dec, True, step_years_list
 
 
 def render_externalities_section() -> Optional[float]:
@@ -802,6 +785,7 @@ def render_system_section() -> Tuple[
     str,
     str,
     str,
+    str,
 ]:
     st.subheader("System configuration")
 
@@ -915,7 +899,6 @@ def render_system_section() -> Tuple[
         "battery_calendar_fade_curve.csv",
     )
     battery_calendar_time_increment_per_step = float(st.session_state.get(K["battery_calendar_time_increment"], 1.0))
-    battery_initial_soh = float(st.session_state.get(K["battery_initial_soh"], 1.0))
     battery_end_of_life_soh = float(st.session_state.get(K["battery_end_of_life_soh"], 0.8))
     battery_loss_model = str(st.session_state.get(K["battery_loss_model"], "constant_efficiency"))
     degradation_supported = str(st.session_state.get(K["formulation"], "steady_state")) == "dynamic"
@@ -1125,7 +1108,6 @@ def render_system_section() -> Tuple[
         calendar_fade_enabled,
         battery_calendar_fade_curve_csv,
         battery_calendar_time_increment_per_step,
-        battery_initial_soh,
         battery_end_of_life_soh,
         generator_label,
         generator_efficiency_model,
@@ -1293,7 +1275,6 @@ def render_project_setup_page() -> None:
                 battery_calendar_fade_enabled,
                 battery_calendar_fade_curve_csv,
                 battery_calendar_time_increment_per_step,
-                battery_initial_soh,
                 battery_end_of_life_soh,
                 generator_label,
                 generator_efficiency_model,
@@ -1344,7 +1325,6 @@ def render_project_setup_page() -> None:
                 battery_calendar_fade_enabled=battery_calendar_fade_enabled,
                 battery_calendar_fade_curve_csv=battery_calendar_fade_curve_csv,
                 battery_calendar_time_increment_per_step=battery_calendar_time_increment_per_step,
-                battery_initial_soh=battery_initial_soh,
                 battery_end_of_life_soh=battery_end_of_life_soh,
                 generator_label=generator_label,
                 generator_efficiency_model=generator_efficiency_model,

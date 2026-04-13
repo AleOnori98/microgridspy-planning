@@ -49,7 +49,6 @@ class Params:
     battery_charge_efficiency: xr.DataArray
     battery_discharge_efficiency: xr.DataArray
     battery_initial_soc: xr.DataArray
-    battery_initial_soh: Optional[xr.DataArray]
     battery_depth_of_discharge: xr.DataArray
     battery_max_charge_time_hours: xr.DataArray
     battery_max_discharge_time_hours: xr.DataArray
@@ -134,7 +133,6 @@ def get_params(ds: xr.Dataset) -> Params:
         battery_charge_efficiency=ds["battery_charge_efficiency"],
         battery_discharge_efficiency=ds["battery_discharge_efficiency"],
         battery_initial_soc=ds["battery_initial_soc"],
-        battery_initial_soh=_opt("battery_initial_soh"),
         battery_depth_of_discharge=ds["battery_depth_of_discharge"],
         battery_max_charge_time_hours=ds["battery_max_charge_time_hours"],
         battery_max_discharge_time_hours=ds["battery_max_discharge_time_hours"],
