@@ -28,6 +28,11 @@ def _safe_int(v: Any, *, name: str) -> int:
     try:
         iv = int(v)
     except Exception:
+        if name == "start_year_label":
+            raise InputValidationError(
+                f"Invalid int for '{name}': {v!r}. Multi-year projects currently require an integer-like "
+                "start year because year labels are used as explicit calendar-year coordinates."
+            )
         raise InputValidationError(f"Invalid int for '{name}': {v!r}")
     if iv <= 0:
         raise InputValidationError(f"'{name}' must be > 0, got {iv}")
@@ -40,7 +45,7 @@ def initialize_sets(project_name: str) -> xr.Dataset:
 
     Dynamic formulation:
       - period: 0..8759 (typical-year hours)
-      - year: 1..n_years
+      - year: explicit calendar-year labels derived from start_year_label
       - inv_step: 1..n_steps (or [1] if capacity_expansion disabled)
       - scenario: scenario labels
       - resource: resource labels
@@ -93,7 +98,7 @@ def initialize_sets(project_name: str) -> xr.Dataset:
     # horizon
     n_years = _safe_int(formulation.get("time_horizon_years", 1), name="time_horizon_years")
 
-    # year labels (use the label as a START YEAR if possible; otherwise fall back to 1..n_years)
+    # Year labels are explicit calendar years derived from start_year_label.
     start_year_int = _safe_int(formulation.get("start_year_label", None), name="start_year_label")
     year_labels = list(range(start_year_int, start_year_int + n_years))  # e.g. 2026..2029
 

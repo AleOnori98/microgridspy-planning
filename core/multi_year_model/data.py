@@ -63,8 +63,8 @@ def _normalize_step_key(k: object) -> str:
     Accepts:
       - "1", "2"
       - 1, 2
-      - "step_1", "step_2"
-      - "base" (alias/default block)
+      - "step_1", "step_2" (legacy aliases)
+      - "base" (single-step legacy alias)
       - "Step 1" (best effort)
     Returns:
       - "1" or "2" ... (string)
@@ -84,13 +84,13 @@ def _normalize_step_key(k: object) -> str:
 def _remap_by_step_dict(path: Path, by_step: dict, *, expected_steps: List[str], context: str) -> Dict[str, dict]:
     """
     Remap a YAML by_step mapping that may be keyed by:
-      - step labels ('1', '2', ...)
-      - aliases ('step_1', 'step_2', ...)
-      - 'base' (default block)
+      - canonical step labels ('1', '2', ...)
+      - legacy aliases ('step_1', 'step_2', ...)
+      - 'base' (single-step legacy alias)
 
     Behavior for 'base':
       - if only one step is expected, 'base' maps to that step
-      - if multiple steps are expected, 'base' is broadcast as default for any missing step
+      - if multiple steps are expected, it is rejected to avoid hidden broadcasting
 
     Raises a clear error if after remapping required steps are still missing.
     """
@@ -103,12 +103,13 @@ def _remap_by_step_dict(path: Path, by_step: dict, *, expected_steps: List[str],
         nk = _normalize_step_key(k)
         remapped[str(nk)] = v
 
-    # Support human-friendly single/default block in templates:
-    # by_step: {base: {...}}
     if "base" in remapped:
-        base_block = remapped["base"]
-        for st in expected_steps:
-            remapped.setdefault(st, base_block)
+        if len(expected_steps) != 1:
+            raise InputValidationError(
+                f"{path.name}: {context} uses legacy key 'base' for a multi-step project. "
+                f"Use explicit step labels {expected_steps}."
+            )
+        remapped.setdefault(expected_steps[0], remapped["base"])
 
     missing = [st for st in expected_steps if st not in remapped]
     if missing:
@@ -315,13 +316,12 @@ def _load_load_demand_csv(
     year_coord: xr.DataArray,
 ) -> xr.DataArray:
     """
-    Parse multi-year (dynamic) load_demand.csv template with 2-row header:
+    Parse multi-year (dynamic) load_demand.csv template with 2-row header.
 
-      meta,hour
-      scenario_1,year_1
-      0,0.0
-      1,0.0
-      ...
+    Conceptual layout:
+      row 1: meta, scenario_1, scenario_1, ...
+      row 2: hour, 2026, 2027, ...
+      row 3+: 0, value, value, ...
 
     Actually stored as a MultiIndex header (scenario, year):
       - ("meta","hour") column must exist and match sets.period exactly (0..8759)
@@ -329,7 +329,8 @@ def _load_load_demand_csv(
       - returns xr.DataArray with dims (year, period, scenario) in kWh
 
     Notes:
-      - year labels are strings in the CSV (e.g., "typical_year", "year_1", "2025")
+      - year labels are read as strings from the CSV header but must match the
+        explicit Multi-Year set labels (typically calendar years such as "2026")
       - scenario labels are strings ("scenario_1", ...)
     """
     if not path.exists():
@@ -428,11 +429,12 @@ def _load_resource_availability_csv(
     resource_coord: xr.DataArray,
 ) -> xr.DataArray:
     """
-    Parse multi-year (dynamic) resource_availability.csv template with 3 header rows:
+    Parse multi-year (dynamic) resource_availability.csv template with 3 header rows.
 
-      meta,scenario_1,scenario_1,...
-      hour,year_1,year_1,...
-      ,Solar PV,Wind Turbine,...
+    Conceptual layout:
+      row 1: meta, scenario_1, scenario_1, ...
+      row 2: hour, 2026, 2026, ...
+      row 3: , Solar PV, Wind Turbine, ...
 
     Required:
       - header=[0,1,2]
@@ -660,35 +662,24 @@ def _load_renewables_yaml(
             )
         j = res_to_idx[res_label]
 
-        resource_top_level_by_step = _component_top_level_by_step(
-            path,
-            item,
-            expected_steps=step_labels,
-            context=f"resource '{res_label}'",
-        )
+        if "by_step" in item:
+            raise InputValidationError(
+                f"{path.name}: resource '{res_label}' uses legacy top-level `by_step`. "
+                "Use `investment.by_step` plus a shared `technical` block."
+            )
 
         # ---- investment.by_step
-        if resource_top_level_by_step is not None:
-            inv_by_step = {}
-            for st in step_labels:
-                blk = resource_top_level_by_step[st].get("investment", None)
-                if not isinstance(blk, dict):
-                    raise InputValidationError(
-                        f"{path.name}: resource '{res_label}'.by_step['{st}'].investment must be a mapping/dict."
-                    )
-                inv_by_step[st] = blk
-        else:
-            inv_block = item.get("investment", None)
-            if not isinstance(inv_block, dict):
-                raise InputValidationError(f"{path.name}: resource '{res_label}' missing/invalid 'investment' mapping.")
+        inv_block = item.get("investment", None)
+        if not isinstance(inv_block, dict):
+            raise InputValidationError(f"{path.name}: resource '{res_label}' missing/invalid 'investment' mapping.")
 
-            inv_by_step_raw = inv_block.get("by_step", None)
-            inv_by_step = _remap_by_step_dict(
-                path,
-                inv_by_step_raw,
-                expected_steps=step_labels,
-                context=f"resource '{res_label}' investment.by_step",
-            )
+        inv_by_step_raw = inv_block.get("by_step", None)
+        inv_by_step = _remap_by_step_dict(
+            path,
+            inv_by_step_raw,
+            expected_steps=step_labels,
+            context=f"resource '{res_label}' investment.by_step",
+        )
 
         legacy_specific_area_by_step: Dict[str, float] = {}
         for st in step_labels:
@@ -719,21 +710,13 @@ def _load_renewables_yaml(
 
         # ---- technical (step-invariant)
         tech_block = item.get("technical", None)
-        if resource_top_level_by_step is not None:
-            tech_block = (resource_top_level_by_step[step_labels[0]].get("technical", None))
-            for st in step_labels[1:]:
-                other_block = resource_top_level_by_step[st].get("technical", None)
-                if not isinstance(other_block, dict):
-                    raise InputValidationError(
-                        f"{path.name}: resource '{res_label}'.by_step['{st}'].technical must be a dict."
-                    )
-                if tech_block != other_block:
-                    raise InputValidationError(
-                        f"{path.name}: resource '{res_label}' provides step-varying technical parameters in by_step. "
-                        "The current multi-year renewable backend still requires renewable technical parameters to be identical across steps."
-                    )
         if not isinstance(tech_block, dict):
             raise InputValidationError(f"{path.name}: resource '{res_label}' missing/invalid 'technical' mapping.")
+        if "by_step" in tech_block:
+            raise InputValidationError(
+                f"{path.name}: resource '{res_label}' uses legacy `technical.by_step`. "
+                "Multi-year renewables require one shared `technical` block."
+            )
 
         for k in PARAMS_TECHNICAL_INVARIANT:
             if k in tech_block:
@@ -770,66 +753,11 @@ def _load_renewables_yaml(
             op_arr["fixed_om_share_per_year"][si, j] = inv_arr["fixed_om_share_per_year"][si, j]
             op_arr["production_subsidy_per_kwh"][si, j] = inv_arr["production_subsidy_per_kwh"][si, j]
 
-        op_block = item.get("operation", None)
-        if isinstance(op_block, dict) or resource_top_level_by_step is not None:
-            if resource_top_level_by_step is None and not isinstance(op_block, dict):
-                raise InputValidationError(f"{path.name}: resource '{res_label}' missing/invalid 'operation' mapping.")
-            for st in step_labels:
-                si = step_to_idx[st]
-                step_op_block = (
-                    resource_top_level_by_step[st].get("operation", None)
-                    if resource_top_level_by_step is not None
-                    else op_block
-                )
-                if not isinstance(step_op_block, dict):
-                    raise InputValidationError(
-                        f"{path.name}: resource '{res_label}' operation mapping is invalid for step '{st}'."
-                    )
-                by_scenario = step_op_block.get("by_scenario", None)
-                if not isinstance(by_scenario, dict):
-                    label = f"resource '{res_label}'.by_step['{st}'].operation.by_scenario" if resource_top_level_by_step is not None else f"resource '{res_label}' operation.by_scenario"
-                    raise InputValidationError(f"{path.name}: {label} missing/invalid.")
-                shared_fom = _require_shared_legacy_scenario_value(
-                    path,
-                    by_scenario=by_scenario,
-                    scenario_labels=scenario_labels,
-                    key="fixed_om_share_per_year",
-                    context=f"resource '{res_label}' operation.by_scenario",
-                    numeric=True,
-                    optional=True,
-                    default=None,
-                )
-                if shared_fom is not None:
-                    op_arr["fixed_om_share_per_year"][si, j] = float(shared_fom)
-                shared_subsidy = _require_shared_legacy_scenario_value(
-                    path,
-                    by_scenario=by_scenario,
-                    scenario_labels=scenario_labels,
-                    key="production_subsidy_per_kwh",
-                    context=f"resource '{res_label}' operation.by_scenario",
-                    numeric=True,
-                    optional=True,
-                    default=None,
-                )
-                if shared_subsidy is not None:
-                    op_arr["production_subsidy_per_kwh"][si, j] = float(shared_subsidy)
-                shared_deg = _require_shared_legacy_scenario_value(
-                    path,
-                    by_scenario=by_scenario,
-                    scenario_labels=scenario_labels,
-                    key="capacity_degradation_rate_per_year",
-                    context=f"resource '{res_label}' operation.by_scenario",
-                    numeric=True,
-                    optional=True,
-                    default=None,
-                )
-                if shared_deg is not None:
-                    current_deg = float(tech_arr["capacity_degradation_rate_per_year"][j])
-                    if not np.isclose(float(shared_deg), current_deg, atol=1e-12, rtol=0.0):
-                        raise InputValidationError(
-                            f"{path.name}: resource '{res_label}' has scenario-varying or step-varying capacity_degradation_rate_per_year in operation.by_scenario. "
-                            "In the shared-technology multi-year model this parameter must be stored once in technical and be common across scenarios and steps."
-                        )
+        if "operation" in item:
+            raise InputValidationError(
+                f"{path.name}: resource '{res_label}' uses legacy `operation` blocks. "
+                "Store fixed O&M and production subsidy in `investment.by_step`, and store capacity degradation once in `technical`."
+            )
 
     # -----------------------------
     # Build xr.Dataset
@@ -872,7 +800,7 @@ def _load_renewables_yaml(
     ds = xr.Dataset(data_vars=data_vars)
     ds.attrs["settings"] = {
         "inputs_loaded": {"renewables_yaml": str(path)},
-        "schema": "shared_technology_capacity_expansion_with_legacy_fallback",
+        "schema": "shared_technology_capacity_expansion",
     }
     return ds
 
@@ -885,22 +813,14 @@ def _load_battery_yaml(
     require_cycle_fade_coefficient: bool = False,
     require_calendar_time_increment: bool = False,
 ) -> xr.Dataset:
-    """Load dynamic battery parameters with shared-technology support and legacy compatibility.
+    """Load dynamic battery parameters from the current shared-technology schema.
 
-    Supported schemas:
-    - Current shared-technology schema:
-        battery.investment.by_step
-        battery.technical
-    - Legacy schemas:
-        battery.by_step.<step>.investment / technical / operation
-        battery.operation
-        battery.investment.by_step + battery.technical + battery.operation.by_scenario
+    Required schema:
+    - battery.investment.by_step
+    - battery.technical
 
-    Notes:
-    - Technical battery parameters are treated as shared across investment
-      steps in the multi-year formulation.
-    - Legacy battery.technical.by_step blocks are accepted only if all steps
-      provide identical technical values (then collapsed to the shared form).
+    Technical battery parameters are treated as shared across investment steps
+    in the multi-year formulation.
     """
     payload = _read_yaml(path)
 
@@ -908,7 +828,6 @@ def _load_battery_yaml(
     if not isinstance(bat, dict):
         raise InputValidationError(f"{path.name}: missing/invalid 'battery' mapping.")
 
-    scenario_labels = [str(s) for s in scenario_coord.values.tolist()]
     step_labels = [str(st) for st in inv_step_coord.values.tolist()]
     n_k = len(step_labels)
 
@@ -956,30 +875,21 @@ def _load_battery_yaml(
         "efficiency_curve_csv",
         "calendar_fade_curve_csv",
     ]
-    battery_top_level_by_step = _component_top_level_by_step(
-        path,
-        bat,
-        expected_steps=step_labels,
-        context="battery",
-    )
-
-    if battery_top_level_by_step is not None:
-        inv_by_step = {}
-        for st in step_labels:
-            blk = battery_top_level_by_step[st].get("investment", None)
-            if not isinstance(blk, dict):
-                raise InputValidationError(f"{path.name}: battery.by_step['{st}'].investment must be a dict.")
-            inv_by_step[st] = blk
-    else:
-        inv_block = bat.get("investment", None)
-        if not isinstance(inv_block, dict):
-            raise InputValidationError(f"{path.name}: missing/invalid battery.investment mapping.")
-        inv_by_step = _remap_by_step_dict(
-            path,
-            inv_block.get("by_step", None),
-            expected_steps=step_labels,
-            context="battery.investment.by_step",
+    if "by_step" in bat:
+        raise InputValidationError(
+            f"{path.name}: battery uses legacy top-level `by_step`. "
+            "Use `battery.investment.by_step` plus a shared `battery.technical` block."
         )
+
+    inv_block = bat.get("investment", None)
+    if not isinstance(inv_block, dict):
+        raise InputValidationError(f"{path.name}: missing/invalid battery.investment mapping.")
+    inv_by_step = _remap_by_step_dict(
+        path,
+        inv_block.get("by_step", None),
+        expected_steps=step_labels,
+        context="battery.investment.by_step",
+    )
     inv_arr = {k: np.full((n_k,), np.nan, dtype=float) for k in INVESTMENT_BY_STEP}
     for st in step_labels:
         blk = inv_by_step[st]
@@ -997,76 +907,17 @@ def _load_battery_yaml(
             inv_arr[k][si] = _as_float(blk.get(k), name=f"battery/investment/{st}/{k}", default=0.0)
 
     tech_block = bat.get("technical", None)
-    if battery_top_level_by_step is not None:
-        tech_by_step = {}
-        for st in step_labels:
-            blk = battery_top_level_by_step[st].get("technical", None)
-            if not isinstance(blk, dict):
-                raise InputValidationError(f"{path.name}: battery.by_step['{st}'].technical must be a dict.")
-            tech_by_step[st] = blk
-        tech_by_step_raw = tech_by_step
-    else:
-        if not isinstance(tech_block, dict):
-            raise InputValidationError(f"{path.name}: missing/invalid battery.technical mapping.")
-        tech_by_step_raw = tech_block.get("by_step", None)
+    if not isinstance(tech_block, dict):
+        raise InputValidationError(f"{path.name}: missing/invalid battery.technical mapping.")
+    tech_by_step_raw = tech_block.get("by_step", None)
     shared_tech: dict[str, float] = {}
     shared_paths: dict[str, str | None] = {}
     legacy_tech = None if tech_by_step_raw is not None else tech_block
 
     if tech_by_step_raw is not None:
-        tech_by_step = _remap_by_step_dict(
-            path,
-            tech_by_step_raw,
-            expected_steps=step_labels,
-            context="battery.technical.by_step",
-        )
-        for st in step_labels:
-            blk = tech_by_step[st]
-            if (
-                "calendar_time_increment_per_year" not in blk
-                and "calendar_time_increment_per_step" in blk
-            ):
-                blk["calendar_time_increment_per_year"] = blk["calendar_time_increment_per_step"]
-        for st in step_labels:
-            blk = tech_by_step[st]
-            for key in REQUIRED_CONDITIONAL_TECHNICAL:
-                if key not in blk:
-                    raise InputValidationError(
-                        f"{path.name}: missing technical param '{key}' in battery.technical.by_step['{st}']."
-                    )
-        shared_tech = _collapse_shared_by_step_numeric(
-            path,
-            by_step=tech_by_step,
-            step_labels=step_labels,
-            keys=SHARED_TECHNICAL_KEYS,
-            optional_defaults=OPTIONAL_SHARED_TECHNICAL,
-            context="battery.technical.by_step",
-        )
-        for key, default_value in CONDITIONAL_TECHNICAL_DEFAULTS.items():
-            if key in REQUIRED_CONDITIONAL_TECHNICAL:
-                shared_tech[key] = _collapse_shared_by_step_numeric(
-                    path,
-                    by_step=tech_by_step,
-                    step_labels=step_labels,
-                    keys=[key],
-                    optional_defaults={},
-                    context="battery.technical.by_step",
-                )[key]
-            else:
-                shared_tech[key] = _collapse_shared_by_step_numeric(
-                    path,
-                    by_step=tech_by_step,
-                    step_labels=step_labels,
-                    keys=[key],
-                    optional_defaults={key: default_value},
-                    context="battery.technical.by_step",
-                )[key]
-        shared_paths = _collapse_shared_by_step_paths(
-            path,
-            by_step=tech_by_step,
-            step_labels=step_labels,
-            keys=SHARED_TECHNICAL_PATH_KEYS,
-            context="battery.technical.by_step",
+        raise InputValidationError(
+            f"{path.name}: battery uses legacy `technical.by_step`. "
+            "Multi-year battery technical parameters must be provided once in the shared `battery.technical` block."
         )
     else:
         if not isinstance(legacy_tech, dict):
@@ -1098,59 +949,10 @@ def _load_battery_yaml(
 
     legacy_op = bat.get("operation", None)
     if isinstance(legacy_op, dict):
-        op_by_step_raw = legacy_op.get("by_step", None)
-        if op_by_step_raw is not None:
-            op_by_step = _remap_by_step_dict(
-                path,
-                op_by_step_raw,
-                expected_steps=step_labels,
-                context="battery.operation.by_step",
-            )
-            for st in step_labels:
-                blk = op_by_step[st]
-                if not isinstance(blk, dict):
-                    raise InputValidationError(f"{path.name}: battery.operation.by_step['{st}'] must be a dict.")
-                si = step_to_idx[st]
-                if "fixed_om_share_per_year" in blk:
-                    inv_arr["fixed_om_share_per_year"][si] = _as_float(
-                        blk.get("fixed_om_share_per_year"),
-                        name=f"battery/operation/{st}/fixed_om_share_per_year",
-                        default=0.0,
-                    )
-                if "capacity_degradation_rate_per_year" in blk:
-                    _apply_shared_override_numeric(
-                        current=shared_tech,
-                        key="capacity_degradation_rate_per_year",
-                        value=_as_float(
-                            blk.get("capacity_degradation_rate_per_year"),
-                            name=f"battery/operation/{st}/capacity_degradation_rate_per_year",
-                            default=0.0,
-                        ),
-                        component="battery",
-                    )
-        else:
-            op_by_scen = legacy_op.get("by_scenario", None)
-            if isinstance(op_by_scen, dict):
-                fom_value = _require_shared_legacy_scenario_value(
-                    path,
-                    by_scenario=op_by_scen,
-                    scenario_labels=scenario_labels,
-                    key="fixed_om_share_per_year",
-                    context="battery.operation.by_scenario",
-                    numeric=True,
-                )
-                inv_arr["fixed_om_share_per_year"][:] = float(fom_value if fom_value is not None else 0.0)
-                cap_deg_value = _require_shared_legacy_scenario_value(
-                    path,
-                    by_scenario=op_by_scen,
-                    scenario_labels=scenario_labels,
-                    key="capacity_degradation_rate_per_year",
-                    context="battery.operation.by_scenario",
-                    numeric=True,
-                    optional=True,
-                    default=0.0,
-                )
-                shared_tech["capacity_degradation_rate_per_year"] = float(cap_deg_value if cap_deg_value is not None else 0.0)
+        raise InputValidationError(
+            f"{path.name}: battery uses legacy `operation` blocks. "
+            "Store fixed O&M in `battery.investment.by_step` and degradation inputs in the shared `battery.technical` block."
+        )
 
     PREFIX = "battery_"
     data_vars = {}
@@ -1186,14 +988,7 @@ def _load_generator_and_fuel_yaml(
     inv_step_coord: xr.DataArray,
     year_coord: xr.DataArray,
 ) -> Tuple[xr.Dataset, xr.Dataset, Optional[xr.Dataset], dict]:
-    """Load dynamic generator + fuel parameters with shared-technology support and legacy compatibility.
-
-    Notes:
-    - Generator technical parameters and fuel physical/emission properties are
-      treated as shared across investment steps in the multi-year formulation.
-    - Legacy generator.technical.by_step and fuel.by_step blocks are accepted
-      only if all steps are identical, then collapsed to the shared form.
-    """
+    """Load dynamic generator + fuel parameters from the current shared-technology schema."""
     payload = _read_yaml(path)
 
     gen = payload.get("generator", None)
@@ -1229,30 +1024,21 @@ def _load_generator_and_fuel_yaml(
     OPTIONAL_SHARED_GEN_TECHNICAL = {"capacity_degradation_rate_per_year": 0.0}
     SHARED_GEN_PATH_KEYS = ["efficiency_curve_csv"]
 
-    generator_top_level_by_step = _component_top_level_by_step(
-        path,
-        gen,
-        expected_steps=step_labels,
-        context="generator",
-    )
-
-    if generator_top_level_by_step is not None:
-        inv_by_step = {}
-        for st in step_labels:
-            blk = generator_top_level_by_step[st].get("investment", None)
-            if not isinstance(blk, dict):
-                raise InputValidationError(f"{path.name}: generator.by_step['{st}'].investment must be a dict.")
-            inv_by_step[st] = blk
-    else:
-        inv_block = gen.get("investment", None)
-        if not isinstance(inv_block, dict):
-            raise InputValidationError(f"{path.name}: missing/invalid generator.investment mapping.")
-        inv_by_step = _remap_by_step_dict(
-            path,
-            inv_block.get("by_step", None),
-            expected_steps=step_labels,
-            context="generator.investment.by_step",
+    if "by_step" in gen:
+        raise InputValidationError(
+            f"{path.name}: generator uses legacy top-level `by_step`. "
+            "Use `generator.investment.by_step` plus a shared `generator.technical` block."
         )
+
+    inv_block = gen.get("investment", None)
+    if not isinstance(inv_block, dict):
+        raise InputValidationError(f"{path.name}: missing/invalid generator.investment mapping.")
+    inv_by_step = _remap_by_step_dict(
+        path,
+        inv_block.get("by_step", None),
+        expected_steps=step_labels,
+        context="generator.investment.by_step",
+    )
 
     inv_arr = {k: np.full((n_k,), np.nan, dtype=float) for k in GEN_INVESTMENT_STEP}
 
@@ -1279,40 +1065,14 @@ def _load_generator_and_fuel_yaml(
     tech_block = gen.get("technical", None)
     shared_gen_tech: dict[str, float] = {}
     shared_gen_paths: dict[str, str | None] = {}
-    if generator_top_level_by_step is not None:
-        tech_by_step = {}
-        for st in step_labels:
-            blk = generator_top_level_by_step[st].get("technical", None)
-            if not isinstance(blk, dict):
-                raise InputValidationError(f"{path.name}: generator.by_step['{st}'].technical must be a dict.")
-            tech_by_step[st] = blk
-        tech_by_step_raw = tech_by_step
-    else:
-        if not isinstance(tech_block, dict):
-            raise InputValidationError(f"{path.name}: missing/invalid generator.technical mapping.")
-        tech_by_step_raw = tech_block.get("by_step", None)
+    if not isinstance(tech_block, dict):
+        raise InputValidationError(f"{path.name}: missing/invalid generator.technical mapping.")
+    tech_by_step_raw = tech_block.get("by_step", None)
     legacy_tech = None if tech_by_step_raw is not None else tech_block
     if tech_by_step_raw is not None:
-        tech_by_step = _remap_by_step_dict(
-            path,
-            tech_by_step_raw,
-            expected_steps=step_labels,
-            context="generator.technical.by_step",
-        )
-        shared_gen_tech = _collapse_shared_by_step_numeric(
-            path,
-            by_step=tech_by_step,
-            step_labels=step_labels,
-            keys=SHARED_GEN_TECHNICAL_KEYS,
-            optional_defaults=OPTIONAL_SHARED_GEN_TECHNICAL,
-            context="generator.technical.by_step",
-        )
-        shared_gen_paths = _collapse_shared_by_step_paths(
-            path,
-            by_step=tech_by_step,
-            step_labels=step_labels,
-            keys=SHARED_GEN_PATH_KEYS,
-            context="generator.technical.by_step",
+        raise InputValidationError(
+            f"{path.name}: generator uses legacy `technical.by_step`. "
+            "Multi-year generator technical parameters must be provided once in the shared `generator.technical` block."
         )
     else:
         if not isinstance(legacy_tech, dict):
@@ -1332,59 +1092,10 @@ def _load_generator_and_fuel_yaml(
 
     legacy_op_block = gen.get("operation", None)
     if isinstance(legacy_op_block, dict):
-        op_by_step_raw = legacy_op_block.get("by_step", None)
-        if op_by_step_raw is not None:
-            op_by_step = _remap_by_step_dict(
-                path,
-                op_by_step_raw,
-                expected_steps=step_labels,
-                context="generator.operation.by_step",
-            )
-            for st in step_labels:
-                blk = op_by_step[st]
-                if not isinstance(blk, dict):
-                    raise InputValidationError(f"{path.name}: generator.operation.by_step['{st}'] must be a dict.")
-                si = step_to_idx[st]
-                if "fixed_om_share_per_year" in blk:
-                    inv_arr["fixed_om_share_per_year"][si] = _as_float(
-                        blk.get("fixed_om_share_per_year"),
-                        name=f"generator/operation/{st}/fixed_om_share_per_year",
-                        default=0.0,
-                    )
-                if "capacity_degradation_rate_per_year" in blk:
-                    _apply_shared_override_numeric(
-                        current=shared_gen_tech,
-                        key="capacity_degradation_rate_per_year",
-                        value=_as_float(
-                            blk.get("capacity_degradation_rate_per_year"),
-                            name=f"generator/operation/{st}/capacity_degradation_rate_per_year",
-                            default=0.0,
-                        ),
-                        component="generator",
-                    )
-        else:
-            op_by_scenario = legacy_op_block.get("by_scenario", None)
-            if isinstance(op_by_scenario, dict):
-                fom_value = _require_shared_legacy_scenario_value(
-                    path,
-                    by_scenario=op_by_scenario,
-                    scenario_labels=scenario_labels,
-                    key="fixed_om_share_per_year",
-                    context="generator.operation.by_scenario",
-                    numeric=True,
-                )
-                inv_arr["fixed_om_share_per_year"][:] = float(fom_value if fom_value is not None else 0.0)
-                cap_deg_value = _require_shared_legacy_scenario_value(
-                    path,
-                    by_scenario=op_by_scenario,
-                    scenario_labels=scenario_labels,
-                    key="capacity_degradation_rate_per_year",
-                    context="generator.operation.by_scenario",
-                    numeric=True,
-                    optional=True,
-                    default=0.0,
-                )
-                shared_gen_tech["capacity_degradation_rate_per_year"] = float(cap_deg_value if cap_deg_value is not None else 0.0)
+        raise InputValidationError(
+            f"{path.name}: generator uses legacy `operation` blocks. "
+            "Store fixed O&M in `generator.investment.by_step` and degradation once in `generator.technical`."
+        )
 
     gen_data_vars: dict[str, xr.DataArray] = {}
     for k in GEN_INVESTMENT_STEP:
@@ -1413,47 +1124,14 @@ def _load_generator_and_fuel_yaml(
         "direct_emissions_kgco2e_per_unit_fuel": float("nan"),
     }
     fuel_cost_year_arr = np.full((len(scenario_labels), n_y), np.nan, dtype=float)
-    fuel_by_step_raw = fuel.get("by_step", None)
     fuel_technical_block = fuel.get("technical", None)
     fuel_cost_block = fuel.get("cost", None)
-    if fuel_by_step_raw is not None:
-        fuel_by_step = _remap_by_step_dict(
-            path,
-            fuel_by_step_raw,
-            expected_steps=step_labels,
-            context="fuel.by_step",
+    if "by_step" in fuel:
+        raise InputValidationError(
+            f"{path.name}: fuel uses legacy `by_step`. "
+            "Multi-year fuel inputs require one shared `fuel.technical` block plus `fuel.cost.by_scenario` yearly prices."
         )
-        shared_fuel = _collapse_shared_by_step_numeric(
-            path,
-            by_step=fuel_by_step,
-            step_labels=step_labels,
-            keys=list(fuel_shared_vals.keys()),
-            optional_defaults={},
-            context="fuel.by_step",
-        )
-        for k in fuel_shared_vals:
-            fuel_shared_vals[k] = shared_fuel[k]
-        fuel_cost_by_scenario = None
-        if isinstance(fuel_cost_block, dict):
-            fuel_cost_by_scenario = fuel_cost_block.get("by_scenario", None)
-        if not isinstance(fuel_cost_by_scenario, dict):
-            raise InputValidationError(
-                f"{path.name}: shared-technology dynamic fuel inputs require fuel.cost.by_scenario for yearly fuel prices."
-            )
-        for s_idx, s in enumerate(scenario_labels):
-            block = fuel_cost_by_scenario.get(s, None)
-            if not isinstance(block, dict):
-                raise InputValidationError(f"{path.name}: fuel.cost.by_scenario missing scenario '{s}'.")
-            series = block.get("by_year_cost_per_unit_fuel", None)
-            if not isinstance(series, list) or len(series) != n_y:
-                raise InputValidationError(
-                    f"{path.name}: fuel.cost.by_scenario['{s}'].by_year_cost_per_unit_fuel must be a list with {n_y} entries."
-                )
-            fuel_cost_year_arr[s_idx, :] = np.asarray(
-                [_as_float(v, name=f"fuel/cost/{s}/by_year_cost_per_unit_fuel[{i}]", default=0.0) for i, v in enumerate(series)],
-                dtype=float,
-            )
-    elif isinstance(fuel_technical_block, dict):
+    if isinstance(fuel_technical_block, dict):
         for key in fuel_shared_vals:
             if key not in fuel_technical_block:
                 raise InputValidationError(f"{path.name}: fuel.technical missing '{key}'.")
@@ -1476,33 +1154,15 @@ def _load_generator_and_fuel_yaml(
                 [_as_float(v, name=f"fuel/cost/{s}/by_year_cost_per_unit_fuel[{i}]", default=0.0) for i, v in enumerate(series)],
                 dtype=float,
             )
+    elif isinstance(fuel.get("by_scenario", None), dict):
+        raise InputValidationError(
+            f"{path.name}: fuel uses legacy `by_scenario`. "
+            "Multi-year fuel inputs now require `fuel.technical` plus `fuel.cost.by_scenario`."
+        )
     else:
-        fuel_by_scenario = fuel.get("by_scenario", None)
-        if not isinstance(fuel_by_scenario, dict):
-            raise InputValidationError(
-                f"{path.name}: fuel must provide either by_step + cost.by_scenario, shared technical + cost.by_scenario, or legacy by_scenario."
-            )
-        for key in fuel_shared_vals:
-            value = _require_shared_legacy_scenario_value(
-                path,
-                by_scenario=fuel_by_scenario,
-                scenario_labels=scenario_labels,
-                key=key,
-                context="fuel.by_scenario",
-                numeric=True,
-            )
-            fuel_shared_vals[key] = float(value)
-        for s_idx, s in enumerate(scenario_labels):
-            fb = fuel_by_scenario[s]
-            series = fb.get("by_year_cost_per_unit_fuel", None)
-            if not isinstance(series, list) or len(series) != n_y:
-                raise InputValidationError(
-                    f"{path.name}: fuel.by_scenario['{s}'].by_year_cost_per_unit_fuel must be a list with {n_y} entries."
-                )
-            fuel_cost_year_arr[s_idx, :] = np.asarray(
-                [_as_float(v, name=f"fuel/{s}/by_year_cost_per_unit_fuel[{i}]", default=0.0) for i, v in enumerate(series)],
-                dtype=float,
-            )
+        raise InputValidationError(
+            f"{path.name}: fuel must provide shared `technical` data plus `cost.by_scenario` yearly prices."
+        )
 
     fuel_ds = xr.Dataset(
         data_vars={
@@ -1616,13 +1276,12 @@ def _load_price_csv_dynamic(
     units: str = "currency_per_kWh",
 ) -> xr.DataArray:
     """
-    Parse dynamic price CSV template with header=[0,1] (scenario, year):
+    Parse dynamic price CSV template with header=[0,1] (scenario, year).
 
-      meta,scenario_1,scenario_1,scenario_2,scenario_2
-      hour,year_1,year_2,year_1,year_2
-      0,0.0,0.0,0.0,0.0
-      1, ...
-      ...
+    Conceptual layout:
+      row 1: meta, scenario_1, scenario_1, scenario_2, scenario_2
+      row 2: hour, 2026, 2027, 2026, 2027
+      row 3+: 0, value, value, value, value
 
     Requirements:
       - CSV uses header=[0,1]
@@ -2150,7 +1809,7 @@ def _initialize_data_legacy(project_name: str, sets: xr.Dataset) -> xr.Dataset:
         battery_path,
         scenario_coord=scenario_coord,
         inv_step_coord=inv_step_coord,
-        require_initial_soh=False,
+        require_initial_soh=bool(battery_degradation_settings.get("endogenous_degradation_enabled", False)),
         require_cycle_fade_coefficient=False,
         require_calendar_time_increment=bool(battery_degradation_settings.get("calendar_fade_enabled", False)),
     )
