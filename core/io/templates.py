@@ -46,7 +46,6 @@ class TemplateSettings:
     battery_cycle_lifetime_to_eol_cycles: float
     battery_calendar_fade_curve_csv: str
     battery_calendar_time_increment_per_step: float
-    battery_initial_soh: float
     battery_end_of_life_soh: float
     generator_label: str
     generator_efficiency_model: str
@@ -113,7 +112,10 @@ def _safe_year_labels(settings: TemplateSettings) -> List[str]:
     Return year labels for the second header level.
     - steady_state -> ["typical_year"]
     - dynamic -> ["<start_year>", "<start_year+1>", ...] for horizon_years
-      If start_year_label is not parseable as int, fall back to "year_1..year_N".
+
+    Multi-year projects require integer-like year labels in the current
+    implementation. We therefore fail fast here instead of implying that a
+    non-integer fallback would work end-to-end.
     """
     if settings.formulation != "dynamic":
         return ["typical_year"]
@@ -123,9 +125,12 @@ def _safe_year_labels(settings: TemplateSettings) -> List[str]:
 
     try:
         y0 = int(str(settings.start_year_label).strip())
-        return [str(y0 + i) for i in range(horizon)]
-    except Exception:
-        return [f"year_{i+1}" for i in range(horizon)]
+    except Exception as exc:
+        raise ValueError(
+            "Multi-year templates require `start_year_label` to be an integer-like year "
+            f"value. Got {settings.start_year_label!r}."
+        ) from exc
+    return [str(y0 + i) for i in range(horizon)]
     
 def _safe_resource_labels(settings: TemplateSettings) -> List[str]:
     """
@@ -158,21 +163,22 @@ def _safe_conversion_labels(settings: TemplateSettings) -> List[str]:
 def _safe_step_keys(settings: TemplateSettings) -> List[str]:
     """
     Step keys used in YAML:
-    - if dynamic AND capacity_expansion -> ["step_1", ..., "step_N"]
-    - else -> ["base"]
+    - steady_state -> ["base"]
+    - dynamic -> ["1"] or ["1", "2", ...]
+
+    This keeps the user-facing multi-year templates aligned with the internal
+    `sets.inv_step` labels and avoids relying on hidden alias remapping for the
+    current workflow.
     """
     is_dynamic = (settings.formulation == "dynamic")
-    capexp = bool(getattr(settings, "capacity_expansion", False))
-
-    if not (is_dynamic and capexp):
+    if not is_dynamic:
         return ["base"]
 
     years = list(settings.investment_steps_years or [])
     if len(years) == 0:
-        # fallback: at least one step
-        return ["step_1"]
+        return ["1"]
 
-    return [f"step_{i+1}" for i in range(len(years))]
+    return [str(i + 1) for i in range(len(years))]
 
 def _safe_battery_label(settings: TemplateSettings) -> str:
     v = str(getattr(settings, "battery_label", "") or "").strip()
@@ -528,7 +534,7 @@ def _write_inputs_readme(path: Path, settings: TemplateSettings, overwrite: bool
                 f"\n## {_safe_generator_efficiency_curve_csv(settings)}\n",
                 "- Optional generator partial-load efficiency curve.\n",
                 "- Used only when `generator.technical.efficiency_curve_csv` points to this file.\n",
-                "- A zero-output anchor is added automatically by the parser; the CSV should only include positive-load points.\n",
+                "- The parser always normalizes the curve to a single zero-output anchor internally. You may include an explicit `0.0` row or provide only positive-load points.\n",
                 "- Preferred semantics: `Efficiency [-]` is a normalized multiplier relative to the corresponding generator nominal full-load efficiency, with the full-load row equal to `1.0`.\n",
                 "- Legacy absolute-efficiency curves are still accepted for backward compatibility.\n",
                 "- Columns:\n",
@@ -585,13 +591,14 @@ def _write_renewables_yaml(path: Path, settings: TemplateSettings, overwrite: bo
         - id, conversion_technology, resource
           investment:
             by_step:
-              "<inv_step_label>":   # e.g. "1", "2" ... or "base" if single step
+              "<inv_step_label>":   # e.g. "1", "2" ... (or "base" in steady_state)
                 {investment-side parameters}
           technical:
             {step-invariant technical parameters}
     Notes:
-      - If capacity_expansion is disabled (or not dynamic), only one step key is used (typically "base" or "1",
-        depending on your _safe_step_keys implementation).
+      - In the dynamic formulation, the generated step keys always follow the
+        internal investment-step labels: "1", "2", ...
+      - In steady_state, the single step key remains "base".
       - In steady_state, degradation keys are omitted (not applicable).
     """
     if path.exists() and not overwrite:
@@ -600,9 +607,8 @@ def _write_renewables_yaml(path: Path, settings: TemplateSettings, overwrite: bo
     resource_labels = _safe_resource_labels(settings)
     conversion_labels = _safe_conversion_labels(settings)
 
-    # IMPORTANT: step keys MUST match sets.inv_step labels.
-    # For dynamic capexp with N steps, this should be ["1","2",...,"N"].
-    # For no capexp, this can be ["base"] OR ["1"] depending on your convention.
+    # IMPORTANT: step keys MUST match the current multi-year canonical convention.
+    # Dynamic templates use ["1","2",...,"N"] and steady_state uses ["base"].
     step_keys = list(map(str, _safe_step_keys(settings)))
 
     is_dynamic = (settings.formulation == "dynamic")
@@ -612,7 +618,7 @@ def _write_renewables_yaml(path: Path, settings: TemplateSettings, overwrite: bo
     steps_years = list(getattr(settings, "investment_steps_years", None) or [])
     steps_meta = None
     if is_dynamic and capexp and steps_years:
-        # Map metadata to inv_step labels "1","2",...
+        # Map metadata to the canonical external step labels "1","2",...
         steps_meta = [{"step": str(i + 1), "duration_years": int(steps_years[i])} for i in range(len(steps_years))]
 
     # -------------------------------------------------------------------------
@@ -744,7 +750,7 @@ def _write_battery_yaml(path: Path, settings: TemplateSettings, overwrite: bool 
         return
 
     scenarios = _template_scenarios(settings)
-    step_keys = _safe_step_keys(settings)  # IMPORTANT: should match sets.inv_step labels, e.g. ["1","2",...]
+    step_keys = _safe_step_keys(settings)  # Dynamic templates use canonical step labels ["1","2",...]
 
     is_dynamic = (settings.formulation == "dynamic")
     capexp = bool(getattr(settings, "capacity_expansion", False))
@@ -754,7 +760,7 @@ def _write_battery_yaml(path: Path, settings: TemplateSettings, overwrite: bool 
     steps_meta = None
     if is_dynamic and capexp:
         steps_meta = [
-            {"step": f"step_{i+1}", "duration_years": int(steps_years[i])}
+            {"step": str(i + 1), "duration_years": int(steps_years[i])}
             for i in range(len(steps_years))
         ]
 
@@ -800,6 +806,7 @@ def _write_battery_yaml(path: Path, settings: TemplateSettings, overwrite: bool 
             ),  # used only by convex_loss_epigraph mode
         }
         if endogenous_degradation:
+            params["initial_soh"] = 1.0
             params["end_of_life_soh"] = float(getattr(settings, "battery_end_of_life_soh", 0.8) or 0.8)
         if cycle_fade_active:
             params["cycle_lifetime_to_eol_cycles"] = float(
@@ -841,7 +848,16 @@ def _write_battery_yaml(path: Path, settings: TemplateSettings, overwrite: bool 
                 "battery_max_discharge_time_hours": "hours",
                 "battery_max_charge_time_hours": "hours",
                 "battery_max_installable_capacity_kwh": "kWh",
-                "battery_efficiency_curve_csv": "csv_path",
+                **(
+                    {"battery_efficiency_curve_csv": "csv_path"}
+                    if _safe_battery_loss_model(settings) == "convex_loss_epigraph"
+                    else {}
+                ),
+                **(
+                    {"battery_initial_soh": "share"}
+                    if _battery_endogenous_degradation_enabled(settings)
+                    else {}
+                ),
                 **(
                     {"battery_end_of_life_soh": "share"}
                     if _battery_endogenous_degradation_enabled(settings)
@@ -895,8 +911,24 @@ def _write_battery_yaml(path: Path, settings: TemplateSettings, overwrite: bool 
                         "Optional upper bound on total installed battery capacity used as a planning/siting limit. "
                         "It is not the physics reference for the current endogenous degradation model."
                     ),
-                    "battery_efficiency_curve_csv": (
-                        "CSV file containing the battery charge/discharge efficiency shape used by the advanced convex loss model. Preferred semantics: normalized multipliers relative to the scalar efficiencies above."
+                    **(
+                        {
+                            "battery_initial_soh": (
+                                "Initial state of health used as the starting point for endogenous battery "
+                                "degradation accounting in the dynamic formulation."
+                            )
+                        }
+                        if _battery_endogenous_degradation_enabled(settings)
+                        else {}
+                    ),
+                    **(
+                        {
+                            "battery_efficiency_curve_csv": (
+                                "CSV file containing the battery charge/discharge efficiency shape used by the advanced convex loss model. Preferred semantics: normalized multipliers relative to the scalar efficiencies above."
+                            )
+                        }
+                        if _safe_battery_loss_model(settings) == "convex_loss_epigraph"
+                        else {}
                     ),
                     **(
                         {
@@ -1026,7 +1058,7 @@ def _write_generator_yaml(path: Path, settings: TemplateSettings, overwrite: boo
     steps_meta = None
     if is_dynamic and capexp:
         steps_meta = [
-            {"step": f"step_{i+1}", "duration_years": int(steps_years[i])}
+            {"step": str(i + 1), "duration_years": int(steps_years[i])}
             for i in range(len(steps_years))
         ]
 
